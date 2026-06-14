@@ -1,0 +1,6 @@
+{
+  "name": "Inventory Tracker",
+  "description": "An intelligent inventory tracker with barcode scanning, manual entry, low-stock notifications, price/discount calculators, a stock history dashboard, and bill scanning price verification using Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
