@@ -24,6 +24,9 @@ interface InventoryDao {
     @Delete
     suspend fun deleteInventoryItem(item: InventoryItem)
 
+    @Query("DELETE FROM inventory_items")
+    suspend fun deleteAllInventoryItems()
+
     // Stock Transactions
     @Query("SELECT * FROM stock_transactions ORDER BY timestamp DESC")
     fun getAllTransactions(): Flow<List<StockTransaction>>

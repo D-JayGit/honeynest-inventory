@@ -13,30 +13,30 @@ import androidx.compose.ui.graphics.Color
 
 private val BentoLightColorScheme =
   lightColorScheme(
-    primary = Color(0xFF6750A4),
+    primary = Color(0xFF4F46E5), // Indigo 600
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFEADDFF),
-    onPrimaryContainer = Color(0xFF21005D),
-    secondary = Color(0xFF625B71),
+    primaryContainer = Color(0xFFEEF2FF), // Indigo 50
+    onPrimaryContainer = Color(0xFF3730A3), // Indigo 800
+    secondary = Color(0xFF10B981), // Emerald 500
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFE8DEF8),
-    onSecondaryContainer = Color(0xFF1D192B),
-    tertiary = Color(0xFF7D5260),
+    secondaryContainer = Color(0xFFECFDF5), // Emerald 50
+    onSecondaryContainer = Color(0xFF065F46), // Emerald 800
+    tertiary = Color(0xFFF59E0B), // Amber 500
     onTertiary = Color.White,
-    tertiaryContainer = Color(0xFFD3E3FD), // Pricing custom blue
-    onTertiaryContainer = Color(0xFF041E49),
-    error = Color(0xFFB3261E),
+    tertiaryContainer = Color(0xFFFEF3C7), // Amber 100
+    onTertiaryContainer = Color(0xFF92400E), // Amber 800
+    error = Color(0xFFEF4444), // Red 500
     onError = Color.White,
-    errorContainer = Color(0xFFF9DEDC), // Alert custom red-pink
-    onErrorContainer = Color(0xFF410002),
-    background = Color(0xFFFEF7FF),
-    onBackground = Color(0xFF1D1B20),
+    errorContainer = Color(0xFFFEF2F2), // Red 50
+    onErrorContainer = Color(0xFF991B1B), // Red 800
+    background = Color(0xFFFAF9F6), // Luxury Warm Alabaster White
+    onBackground = Color(0xFF111827), // Slate 900
     surface = Color.White,
-    onSurface = Color(0xFF1D1B20),
-    surfaceVariant = Color(0xFFF3EDF7),
-    onSurfaceVariant = Color(0xFF49454F),
-    outline = Color(0xFFCAC4D0),
-    outlineVariant = Color(0xFFE6E1E5)
+    onSurface = Color(0xFF111827), // Slate 900
+    surfaceVariant = Color(0xFFF3F4F6), // Cool gray 100
+    onSurfaceVariant = Color(0xFF4B5563), // Slate 600
+    outline = Color(0xFFE5E7EB), // Gray 200
+    outlineVariant = Color(0xFFF3F4F6) // Gray 100
   )
 
 private val BentoDarkColorScheme =
@@ -69,7 +69,7 @@ private val BentoDarkColorScheme =
 
 @Composable
 fun MyApplicationTheme(
-  darkTheme: Boolean = isSystemInDarkTheme(),
+  darkTheme: Boolean = false, // Default to false to showcase our new beautiful aesthetic light theme!
   dynamicColor: Boolean = false, // Force custom Bento colors
   content: @Composable () -> Unit,
 ) {

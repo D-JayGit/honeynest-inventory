@@ -314,6 +314,13 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun deleteAllItems() {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.deleteAllItems()
+            triggerNotification("Successfully deleted all inventory products", "WARNING")
+        }
+    }
+
     // Barcode Scanning Input Automation
     fun handleBarcodeScanned(barcode: String, scanType: String = "SCAN_IN", customQty: Int = 1) {
         viewModelScope.launch(Dispatchers.IO) {

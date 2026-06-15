@@ -28,6 +28,10 @@ class InventoryRepository(private val dao: InventoryDao) {
         dao.deleteInventoryItem(item)
     }
 
+    suspend fun deleteAllItems() {
+        dao.deleteAllInventoryItems()
+    }
+
     suspend fun addTransaction(transaction: StockTransaction): Long {
         return dao.insertTransaction(transaction)
     }

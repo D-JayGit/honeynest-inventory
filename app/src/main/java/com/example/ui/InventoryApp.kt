@@ -38,6 +38,15 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -286,6 +295,7 @@ fun InventoryApp(viewModel: InventoryViewModel) {
                         showAddItemDialog = true
                     },
                     onDelete = { viewModel.deleteItem(it) },
+                    onDeleteAll = { viewModel.deleteAllItems() },
                     onQuickStockChange = { item, delta ->
                         viewModel.handleBarcodeScanned(
                             barcode = item.barcode,
@@ -344,6 +354,10 @@ fun InventoryApp(viewModel: InventoryViewModel) {
                 ) {
                     val latestNotify = notifications.firstOrNull()
                     if (latestNotify != null) {
+                        LaunchedEffect(latestNotify.id) {
+                            kotlinx.coroutines.delay(3000)
+                            viewModel.dismissNotification(latestNotify.id)
+                        }
                         Card(
                             colors = CardDefaults.cardColors(
                                 containerColor = when (latestNotify.type) {
@@ -693,12 +707,13 @@ fun DashboardTab(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
+                            val strokeColor = MaterialTheme.colorScheme.primary
                             Box(
                                 modifier = Modifier
                                     .size(54.dp)
                                     .drawBehind {
                                         drawCircle(
-                                            color = Color(0xFF6750A4),
+                                            color = strokeColor,
                                             style = Stroke(
                                                 width = 1.5.dp.toPx(),
                                                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 12f))
@@ -1380,6 +1395,44 @@ fun InventoryItemRow(
     }
 }
 
+@Composable
+fun CameraPreview(
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+
+    AndroidView(
+        factory = { ctx ->
+            val previewView = PreviewView(ctx).apply {
+                scaleType = PreviewView.ScaleType.FILL_CENTER
+            }
+            cameraProviderFuture.addListener({
+                val cameraProvider = cameraProviderFuture.get()
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+
+                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+                try {
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview
+                    )
+                } catch (exc: Exception) {
+                    exc.printStackTrace()
+                }
+            }, ContextCompat.getMainExecutor(context))
+            previewView
+        },
+        modifier = modifier
+    )
+}
+
 // ---------------- SCAN TERMINAL TAB ----------------
 
 @Composable
@@ -1393,6 +1446,22 @@ fun ScanTerminalTab(
     var simulatedBarcode by remember { mutableStateOf("") }
     var scanMode by remember { mutableStateOf("SCAN_IN") } // "SCAN_IN" or "SCAN_OUT"
     var scanQty by remember { mutableStateOf("1") }
+
+    val context = LocalContext.current
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        hasCameraPermission = isGranted
+    }
 
     Column(
         modifier = Modifier
@@ -1457,6 +1526,48 @@ fun ScanTerminalTab(
                 .background(Color.Black),
             contentAlignment = Alignment.Center
         ) {
+            if (hasCameraPermission) {
+                CameraPreview(
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(24.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CameraAlt,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.6f),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Camera Live Scanner Ready",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = "Enable camera permission to initialize the live visual scanner.",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
+                    )
+                    Button(
+                        onClick = {
+                            permissionLauncher.launch(Manifest.permission.CAMERA)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Text("Enable Live Scanner", color = Color.White)
+                    }
+                }
+            }
+
             // Scanner target outline
             Box(
                 modifier = Modifier
@@ -2833,16 +2944,43 @@ fun LedgerTab(
     items: List<InventoryItem>,
     onEditItem: (InventoryItem) -> Unit,
     onDelete: (InventoryItem) -> Unit,
+    onDeleteAll: () -> Unit,
     onQuickStockChange: (InventoryItem, Int) -> Unit,
     onAddProductClick: () -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
+    var showDeleteAllConfirm by remember { mutableStateOf(false) }
+
     val filteredItems = remember(items, searchQuery) {
         items.filter {
             it.name.contains(searchQuery, ignoreCase = true) ||
             it.barcode.contains(searchQuery, ignoreCase = true) ||
             it.category.contains(searchQuery, ignoreCase = true)
         }
+    }
+
+    if (showDeleteAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteAllConfirm = false },
+            title = { Text("Delete All Inventory Items?") },
+            text = { Text("Are you absolutely sure you want to delete all products from your inventory ledger? This permanent wipe cannot be undone.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteAll()
+                        showDeleteAllConfirm = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Yes, Delete All", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteAllConfirm = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     LazyColumn(
@@ -2879,13 +3017,31 @@ fun LedgerTab(
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
                         )
                     }
-                    Button(
-                        onClick = onAddProductClick,
-                        shape = RoundedCornerShape(12.dp)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Add Item", style = MaterialTheme.typography.labelMedium)
+                        OutlinedButton(
+                            onClick = { showDeleteAllConfirm = true },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            ),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Clear All", style = MaterialTheme.typography.labelMedium)
+                        }
+
+                        Button(
+                            onClick = onAddProductClick,
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Add Item", style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
             }
