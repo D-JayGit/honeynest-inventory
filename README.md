@@ -19,3 +19,22 @@ View your app in AI Studio: https://ai.studio/apps/db111173-d436-4414-9744-67643
 4. Create a file named `.env` in the project directory and set `GEMINI_API_KEY` in that file to your Gemini API key (see `.env.example` for an example)
 5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
 6. Run the app on an emulator or physical device
+
+## Command-line build
+
+The project includes a Gradle 9.3.1 bootstrap compatible with Android Gradle Plugin 9.1.1. It downloads and verifies Gradle's official wrapper runtime on the first run, then verifies the Gradle distribution before use.
+
+On Windows:
+
+```powershell
+.\gradlew.bat assembleDebug
+```
+
+On macOS or Linux:
+
+```sh
+chmod +x gradlew
+./gradlew assembleDebug
+```
+
+Use JDK 17 or newer to run the Android Gradle Plugin.

@@ -2,7 +2,10 @@ package com.example.data
 
 import androidx.room.*
 
-@Entity(tableName = "inventory_items")
+@Entity(
+    tableName = "inventory_items",
+    indices = [Index(value = ["barcode"], unique = true)]
+)
 data class InventoryItem(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val barcode: String,

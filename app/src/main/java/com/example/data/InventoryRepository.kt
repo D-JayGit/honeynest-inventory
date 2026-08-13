@@ -16,20 +16,22 @@ class InventoryRepository(private val dao: InventoryDao) {
         return dao.getInventoryItemById(id)
     }
 
-    suspend fun insertItem(item: InventoryItem): Long {
-        return dao.insertInventoryItem(item)
-    }
+    suspend fun saveItemWithTransaction(
+        item: InventoryItem,
+        transaction: StockTransaction?
+    ): Long = dao.saveInventoryItemAndTransaction(item, transaction)
 
-    suspend fun updateItem(item: InventoryItem) {
-        dao.updateInventoryItem(item)
-    }
+    suspend fun applyBarcodeStockChange(
+        barcode: String,
+        requestedChange: Int,
+        transactionType: String,
+        note: String
+    ): Pair<InventoryItem, Int>? = dao.applyBarcodeStockChange(barcode, requestedChange, transactionType, note)
 
-    suspend fun deleteItem(item: InventoryItem) {
-        dao.deleteInventoryItem(item)
-    }
+    suspend fun deleteItem(item: InventoryItem) = dao.deleteInventoryItemAndRecord(item)
 
     suspend fun deleteAllItems() {
-        dao.deleteAllInventoryItems()
+        dao.deleteAllInventoryItemsAndRecord()
     }
 
     suspend fun addTransaction(transaction: StockTransaction): Long {
@@ -44,10 +46,7 @@ class InventoryRepository(private val dao: InventoryDao) {
         session: ReconciliationSession,
         items: List<ReconciliationItem>
     ): Long {
-        val sessionId = dao.insertReconciliationSession(session)
-        val itemsWithSessionId = items.map { it.copy(sessionId = sessionId) }
-        dao.insertReconciliationItems(itemsWithSessionId)
-        return sessionId
+        return dao.createReconciliationSessionWithItems(session, items)
     }
 
     suspend fun getReconciliationSessionById(id: Long): ReconciliationSession? {
@@ -63,25 +62,10 @@ class InventoryRepository(private val dao: InventoryDao) {
     }
 
     suspend fun updateReconciliationItem(item: ReconciliationItem) {
-        dao.updateReconciliationItem(item)
-        
-        // Update session stats
-        val sessionId = item.sessionId
-        val allSessionItems = dao.getReconciliationItemsForSessionSync(sessionId)
-        val verifiedCount = allSessionItems.count { it.isVerified }
-        
-        val session = dao.getReconciliationSessionById(sessionId)
-        if (session != null) {
-            dao.updateReconciliationSession(
-                session.copy(
-                    verifiedItemsCount = verifiedCount,
-                    status = if (verifiedCount == allSessionItems.size) "COMPLETED" else "OPEN"
-                )
-            )
-        }
+        dao.updateReconciliationItemAndSessionStats(item)
     }
 
     suspend fun deleteReconciliationSession(sessionId: Long) {
-        dao.deleteReconciliationSession(sessionId)
+        dao.deleteReconciliationSessionWithItems(sessionId)
     }
 }

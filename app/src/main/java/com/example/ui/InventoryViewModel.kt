@@ -114,10 +114,10 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 )
                 
                 initialItems.forEach { item ->
-                    val id = repository.insertItem(item)
-                    repository.addTransaction(
+                    repository.saveItemWithTransaction(
+                        item,
                         StockTransaction(
-                            itemId = id,
+                            itemId = 0,
                             barcode = item.barcode,
                             itemName = item.name,
                             changeQuantity = item.currentQuantity,
@@ -228,6 +228,16 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         onComplete: () -> Unit
     ) {
         viewModelScope.launch(Dispatchers.IO) {
+            val normalizedBarcode = barcode.trim()
+            if (normalizedBarcode.isEmpty() || name.isBlank()) {
+                triggerNotification("A barcode and product name are required.", "ERROR")
+                return@launch
+            }
+            if (quantity < 0 || threshold < 0 || purchasePrice < 0 || listPrice < 0 || discountPercentage !in 0.0..100.0) {
+                triggerNotification("Quantity, prices, and threshold must be valid non-negative values. Discount must be 0–100%.", "ERROR")
+                return@launch
+            }
+
             // Calculate selling price
             val sellingPrice = if (discountPercentage > 0.0) {
                 listPrice * (1.0 - discountPercentage / 100.0)
@@ -235,11 +245,20 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 listPrice
             }
 
-            val existingItem = if (id > 0) repository.getItemById(id) else repository.getItemByBarcode(barcode)
+            val itemWithBarcode = repository.getItemByBarcode(normalizedBarcode)
+            val existingItem = if (id > 0) {
+                if (itemWithBarcode != null && itemWithBarcode.id != id) {
+                    triggerNotification("That barcode is already assigned to ${itemWithBarcode.name}.", "ERROR")
+                    return@launch
+                }
+                repository.getItemById(id)
+            } else {
+                itemWithBarcode
+            }
 
             val itemToSave = if (existingItem != null) {
                 existingItem.copy(
-                    barcode = barcode,
+                    barcode = normalizedBarcode,
                     name = name,
                     description = description,
                     category = category,
@@ -253,7 +272,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             } else {
                 InventoryItem(
-                    barcode = barcode,
+                    barcode = normalizedBarcode,
                     name = name,
                     description = description,
                     category = category,
@@ -266,8 +285,6 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
 
-            val savedId = repository.insertItem(itemToSave)
-
             // Calculate change quantity for transaction log
             val change = if (existingItem != null) {
                 quantity - existingItem.currentQuantity
@@ -275,18 +292,19 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 quantity
             }
 
-            if (change != 0) {
-                repository.addTransaction(
+            repository.saveItemWithTransaction(
+                itemToSave,
+                transaction = if (change != 0) {
                     StockTransaction(
-                        itemId = savedId,
-                        barcode = barcode,
+                        itemId = 0,
+                        barcode = normalizedBarcode,
                         itemName = name,
                         changeQuantity = change,
-                        transactionType = if (existingItem != null) "MANUAL_SUB" else "MANUAL_ADD",
-                        note = "Updated count manually (New Total: $quantity)"
+                        transactionType = if (change > 0) "MANUAL_ADD" else "MANUAL_SUB",
+                        note = "Updated count manually (New total: $quantity)"
                     )
-                )
-            }
+                } else null
+            )
 
             triggerNotification("Saved item: $name", "SUCCESS")
             checkLowStockAlerts()
@@ -299,16 +317,6 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     fun deleteItem(item: InventoryItem) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.deleteItem(item)
-            repository.addTransaction(
-                StockTransaction(
-                    itemId = item.id,
-                    barcode = item.barcode,
-                    itemName = item.name,
-                    changeQuantity = -item.currentQuantity,
-                    transactionType = "MANUAL_SUB",
-                    note = "Item deleted from database"
-                )
-            )
             triggerNotification("Deleted item: ${item.name}", "INFO")
             checkLowStockAlerts()
         }
@@ -328,53 +336,47 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             _scannedBarcodeNotFound.value = null
             _scannedProductPreFill.value = null
 
-            val item = repository.getItemByBarcode(barcode)
-            if (item != null) {
+            val normalizedBarcode = barcode.trim()
+            if (normalizedBarcode.isEmpty() || customQty <= 0) {
+                triggerNotification("Enter a barcode and a quantity greater than zero.", "ERROR")
+                return@launch
+            }
+            val requestedChange = if (scanType == "SCAN_IN") customQty else -customQty
+            val stockChange = repository.applyBarcodeStockChange(
+                barcode = normalizedBarcode,
+                requestedChange = requestedChange,
+                transactionType = scanType,
+                note = "Scanned $scanType of barcode $normalizedBarcode"
+            )
+            if (stockChange != null) {
                 // Determine quantity direction
-                val change = if (scanType == "SCAN_IN") customQty else -customQty
-                val newQty = (item.currentQuantity + change).coerceAtLeast(0)
-
-                val updatedItem = item.copy(
-                    currentQuantity = newQty,
-                    updatedAt = System.currentTimeMillis()
-                )
-                repository.updateItem(updatedItem)
-
-                // Log Transaction
-                repository.addTransaction(
-                    StockTransaction(
-                        itemId = item.id,
-                        barcode = item.barcode,
-                        itemName = item.name,
-                        changeQuantity = change,
-                        transactionType = scanType,
-                        note = "Scanned $scanType of barcode $barcode"
-                    )
-                )
-
+                val updatedItem = stockChange.first
+                val appliedQuantity = kotlin.math.abs(stockChange.second)
                 _recentScannedItem.value = updatedItem
                 
                 val actionLabel = if (scanType == "SCAN_IN") "Added" else "Removed"
-                triggerNotification("$actionLabel $customQty units of ${item.name}! (Remaining: $newQty)", "SUCCESS")
+                triggerNotification("$actionLabel $appliedQuantity units of ${updatedItem.name}. Remaining: ${updatedItem.currentQuantity}", "SUCCESS")
                 
                 // If there's an active reconciliation session, increment matches
-                reconcileScannedProduct(item.name, barcode, customQty)
+                if (scanType == "SCAN_IN") {
+                    reconcileScannedProduct(updatedItem.name, normalizedBarcode, appliedQuantity)
+                }
                 checkLowStockAlerts()
 
                 // Background search external product database as requested
-                queryExternalProductApi(barcode) { /* no-op for existing items */ }
+                queryExternalProductApi(normalizedBarcode) { /* no-op for existing items */ }
             } else {
                 // Scan unregistered product
-                triggerNotification("Checking external product database API for barcode: $barcode...", "INFO")
-                queryExternalProductApi(barcode) { info ->
+                triggerNotification("Checking external product database API for barcode: $normalizedBarcode...", "INFO")
+                queryExternalProductApi(normalizedBarcode) { info ->
                     if (info != null) {
                         // Match found - prefill details & store barcode to trigger dialog
                         _scannedProductPreFill.value = info
-                        _scannedBarcodeNotFound.value = barcode
+                        _scannedBarcodeNotFound.value = normalizedBarcode
                     } else {
                         // No match found - prompt for manual entry
                         _scannedProductPreFill.value = null
-                        _scannedBarcodeNotFound.value = barcode
+                        _scannedBarcodeNotFound.value = normalizedBarcode
                     }
                 }
             }
@@ -469,6 +471,10 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     // Direct Sales Section pricing updates
     fun updateItemPricing(item: InventoryItem, basePrice: Double, discount: Double) {
         viewModelScope.launch(Dispatchers.IO) {
+            if (basePrice < 0 || discount !in 0.0..100.0) {
+                triggerNotification("Price must be non-negative and discount must be 0–100%.", "ERROR")
+                return@launch
+            }
             val finalPrice = if (discount > 0.0) basePrice * (1.0 - discount / 100.0) else basePrice
             val updatedItem = item.copy(
                 listPrice = basePrice,
@@ -476,10 +482,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 sellingPrice = finalPrice,
                 updatedAt = System.currentTimeMillis()
             )
-            repository.updateItem(updatedItem)
-            
-            // Log Transaction
-            repository.addTransaction(
+            repository.saveItemWithTransaction(updatedItem,
                 StockTransaction(
                     itemId = item.id,
                     barcode = item.barcode,
@@ -585,10 +588,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
 
             val apiKey = BuildConfig.GEMINI_API_KEY
             if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
-                // Simulated fallback if api key is mock/empty to ensure delightful sandbox experience
-                delaySimulation(2000)
-                Log.e("InventoryVM", "API Key is missing or placeholder. Running simulation fallback.")
-                simulateBillExtraction(customName)
+                _billScanState.value = BillScanState.Error("Receipt analysis requires a configured Gemini API key.")
+                triggerNotification("Receipt analysis is unavailable until Gemini is configured.", "ERROR")
                 return@launch
             }
 
@@ -636,9 +637,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
 
             } catch (e: Exception) {
                 Log.e("InventoryVM", "Gemini error: ${e.message}", e)
-                // If API fails due to context limits or network, let's gracefully fall back to simulation
-                // so the app stays functional for the grader/user!
-                simulateBillExtraction("$customName (Simulated OCR)")
+                _billScanState.value = BillScanState.Error("Receipt analysis failed. No reconciliation session was created.")
+                triggerNotification("Receipt analysis failed. Check your connection and try again.", "ERROR")
             }
         }
     }
@@ -694,41 +694,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun simulateBillExtraction(sessionName: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            _billScanState.value = BillScanState.Loading("Simulating local intelligent receipt analyzer...")
-            val simulatedItems = listOf(
-                ReconciliationItem(name = "Classic Olive Oil 1L", expectedQuantity = 5, expectedPrice = 8.50),
-                ReconciliationItem(name = "Diet Coke 355mL", expectedQuantity = 12, expectedPrice = 0.40),
-                ReconciliationItem(name = "Greek Yogurt Honey", expectedQuantity = 6, expectedPrice = 1.80),
-                ReconciliationItem(name = "Fresh Red Tomatoes 1kg", expectedQuantity = 3, expectedPrice = 2.20)
-            )
-            
-            val session = ReconciliationSession(
-                billName = sessionName,
-                totalBillItems = simulatedItems.size,
-                status = "OPEN"
-            )
-            val sessionId = repository.createReconciliationSession(session, simulatedItems)
-            _activeSessionId.value = sessionId
-            
-            _billScanState.value = BillScanState.Success(sessionName, simulatedItems)
-            triggerNotification("[SIMULATOR] Analyzed invoice! Loaded ${simulatedItems.size} expected items.", "SUCCESS")
-        }
-    }
-
     fun resetBillScanState() {
         _billScanState.value = BillScanState.Idle
-    }
-
-    private suspend fun delaySimulation(ms: Long) {
-        withContext(Dispatchers.IO) {
-            try {
-                Thread.sleep(ms)
-            } catch (e: InterruptedException) {
-                // Ignore
-            }
-        }
     }
 
     // Helper extension function: Bitmap to Base64 String

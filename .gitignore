@@ -15,4 +15,5 @@
 .cxx
 local.properties
 .env
+gradle/wrapper/gradle-wrapper.jar
 debug.keystore

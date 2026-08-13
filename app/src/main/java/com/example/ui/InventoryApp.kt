@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -60,8 +61,13 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.example.data.*
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.Executors
 
 data class DayStockSummary(
     val dayName: String,
@@ -1397,11 +1403,40 @@ fun InventoryItemRow(
 
 @Composable
 fun CameraPreview(
+    isScanning: Boolean,
+    onBarcodeScanned: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val latestIsScanning by rememberUpdatedState(isScanning)
+    val latestOnBarcodeScanned by rememberUpdatedState(onBarcodeScanned)
+    val barcodeScanner = remember {
+        BarcodeScanning.getClient(
+            BarcodeScannerOptions.Builder()
+                .setBarcodeFormats(
+                    Barcode.FORMAT_EAN_13,
+                    Barcode.FORMAT_EAN_8,
+                    Barcode.FORMAT_UPC_A,
+                    Barcode.FORMAT_UPC_E,
+                    Barcode.FORMAT_CODE_128,
+                    Barcode.FORMAT_CODE_39,
+                    Barcode.FORMAT_CODE_93,
+                    Barcode.FORMAT_ITF,
+                    Barcode.FORMAT_QR_CODE
+                )
+                .build()
+        )
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            barcodeScanner.close()
+            analysisExecutor.shutdown()
+        }
+    }
 
     AndroidView(
         factory = { ctx ->
@@ -1413,6 +1448,36 @@ fun CameraPreview(
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                    .also { analysis ->
+                        analysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                            val mediaImage = imageProxy.image
+                            if (mediaImage == null || !latestIsScanning) {
+                                imageProxy.close()
+                            } else {
+                                val inputImage = InputImage.fromMediaImage(
+                                    mediaImage,
+                                    imageProxy.imageInfo.rotationDegrees
+                                )
+                                barcodeScanner.process(inputImage)
+                                    .addOnSuccessListener { barcodes ->
+                                        val barcode = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
+                                        barcode?.rawValue?.let { rawValue ->
+                                            ContextCompat.getMainExecutor(context).execute {
+                                                if (latestIsScanning) {
+                                                    latestOnBarcodeScanned(rawValue)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .addOnCompleteListener {
+                                        imageProxy.close()
+                                    }
+                            }
+                        }
+                    }
 
                 val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
@@ -1421,7 +1486,8 @@ fun CameraPreview(
                     cameraProvider.bindToLifecycle(
                         lifecycleOwner,
                         cameraSelector,
-                        preview
+                        preview,
+                        imageAnalysis
                     )
                 } catch (exc: Exception) {
                     exc.printStackTrace()
@@ -1446,6 +1512,7 @@ fun ScanTerminalTab(
     var simulatedBarcode by remember { mutableStateOf("") }
     var scanMode by remember { mutableStateOf("SCAN_IN") } // "SCAN_IN" or "SCAN_OUT"
     var scanQty by remember { mutableStateOf("1") }
+    var isCameraScanning by remember { mutableStateOf(true) }
 
     val context = LocalContext.current
     var hasCameraPermission by remember {
@@ -1528,6 +1595,15 @@ fun ScanTerminalTab(
         ) {
             if (hasCameraPermission) {
                 CameraPreview(
+                    isScanning = isCameraScanning,
+                    onBarcodeScanned = { barcode ->
+                        if (isCameraScanning) {
+                            isCameraScanning = false
+                            simulatedBarcode = barcode
+                            val qty = scanQty.toIntOrNull() ?: 1
+                            viewModel.handleBarcodeScanned(barcode, scanMode, qty)
+                        }
+                    },
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
@@ -1663,6 +1739,19 @@ fun ScanTerminalTab(
                     }
                 }
 
+                if (!isCameraScanning) {
+                    Button(
+                        onClick = { isCameraScanning = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    ) {
+                        Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Scan next item", fontSize = 12.sp)
+                    }
+                }
+
                 if (activeBarcodeNotFound != null) {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = Color(0xBBD32F2F)),
@@ -1687,7 +1776,7 @@ fun ScanTerminalTab(
                 }
 
                 Text(
-                    text = "Awaiting Barcode Trigger...",
+                    text = if (isCameraScanning) "Point the camera at a barcode" else "Scan paused to prevent duplicate stock changes",
                     color = Color.White.copy(alpha = 0.7f),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -1698,20 +1787,20 @@ fun ScanTerminalTab(
             }
         }
 
-        // Test Trigger Board (Simulate Scan instantly for grader)
+        // Manual fallback for devices where camera scanning is not practical.
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Text(
-                    text = "Grader Testing Scanner Control",
+                    text = "Manual Barcode Entry",
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "Select a product barcode to simulate a camera scan reading event instantly:",
+                    text = "Choose a saved product or enter a barcode manually:",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 12.dp)
@@ -1734,6 +1823,7 @@ fun ScanTerminalTab(
                                 )
                                 .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
                                 .clickable {
+                                    isCameraScanning = false
                                     simulatedBarcode = item.barcode
                                     val qty = scanQty.toIntOrNull() ?: 1
                                     viewModel.handleBarcodeScanned(item.barcode, scanMode, qty)
@@ -1753,6 +1843,7 @@ fun ScanTerminalTab(
                             .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
                             .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
                             .clickable {
+                                isCameraScanning = false
                                 val randomMockBc = "07" + (100000000..999999999).random().toString()
                                 simulatedBarcode = randomMockBc
                                 val qty = scanQty.toIntOrNull() ?: 1
@@ -1801,6 +1892,7 @@ fun ScanTerminalTab(
                     Button(
                         onClick = {
                             if (simulatedBarcode.isNotEmpty()) {
+                                isCameraScanning = false
                                 val qty = scanQty.toIntOrNull() ?: 1
                                 viewModel.handleBarcodeScanned(simulatedBarcode, scanMode, qty)
                             }
