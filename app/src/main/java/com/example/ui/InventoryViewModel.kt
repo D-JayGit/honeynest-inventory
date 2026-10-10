@@ -51,6 +51,25 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         initialValue = emptyList()
     )
 
+    val openBillingSessions: StateFlow<List<BillingSessionWithItems>> = db.inventoryDao()
+        .observeOpenBillingSessions()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+    val completedBillingSessions: StateFlow<List<BillingSessionWithItems>> = db.inventoryDao()
+        .observeCompletedBillingSessions()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+    private val _activeBillingSessionId = MutableStateFlow<Long?>(null)
+    val activeBillingSessionId: StateFlow<Long?> = _activeBillingSessionId.asStateFlow()
+
     // Low stock flow
     val lowStockItems: StateFlow<List<InventoryItem>> = allItems.map { items ->
         items.filter { it.currentQuantity <= it.threshold }
@@ -217,6 +236,9 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     fun addOrUpdateItem(
         id: Long = 0,
         barcode: String,
+        productCode: String,
+        colorCode: String,
+        sizeCode: String,
         name: String,
         description: String,
         category: String,
@@ -229,8 +251,16 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             val normalizedBarcode = barcode.trim()
-            if (normalizedBarcode.isEmpty() || name.isBlank()) {
-                triggerNotification("A barcode and product name are required.", "ERROR")
+            val normalizedProductCode = SkuGenerator.normalizeCode(productCode)
+            val normalizedColorCode = SkuGenerator.normalizeCode(colorCode)
+            val normalizedSizeCode = SkuGenerator.normalizeCode(sizeCode)
+
+            if (name.isBlank()) {
+                triggerNotification("A product name is required.", "ERROR")
+                return@launch
+            }
+            if (!SkuGenerator.isValidComponents(normalizedProductCode, normalizedColorCode, normalizedSizeCode)) {
+                triggerNotification("Use a 2-character product code, a 2-character color code, and a 1–4 character size code. Use NA when color or size does not apply.", "ERROR")
                 return@launch
             }
             if (quantity < 0 || threshold < 0 || purchasePrice < 0 || listPrice < 0 || discountPercentage !in 0.0..100.0) {
@@ -245,7 +275,9 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 listPrice
             }
 
-            val itemWithBarcode = repository.getItemByBarcode(normalizedBarcode)
+            val itemWithBarcode = normalizedBarcode
+                .takeIf { it.isNotBlank() }
+                ?.let { repository.getItemByBarcode(it) }
             val existingItem = if (id > 0) {
                 if (itemWithBarcode != null && itemWithBarcode.id != id) {
                     triggerNotification("That barcode is already assigned to ${itemWithBarcode.name}.", "ERROR")
@@ -259,6 +291,9 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             val itemToSave = if (existingItem != null) {
                 existingItem.copy(
                     barcode = normalizedBarcode,
+                    productCode = normalizedProductCode,
+                    colorCode = normalizedColorCode,
+                    sizeCode = normalizedSizeCode,
                     name = name,
                     description = description,
                     category = category,
@@ -273,6 +308,9 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             } else {
                 InventoryItem(
                     barcode = normalizedBarcode,
+                    productCode = normalizedProductCode,
+                    colorCode = normalizedColorCode,
+                    sizeCode = normalizedSizeCode,
                     name = name,
                     description = description,
                     category = category,
@@ -310,6 +348,55 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             checkLowStockAlerts()
             withContext(Dispatchers.Main) {
                 onComplete()
+            }
+        }
+    }
+
+    fun previewProductSheetCsv(csv: String, onComplete: (ProductSheetPreview) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = try {
+                parseProductSheetCsv(csv, db.inventoryDao().getAllInventoryItemsSync())
+            } catch (error: Exception) {
+                ProductSheetPreview(emptyList(), listOf(error.message ?: "Could not read the CSV file."), 0)
+            }
+            withContext(Dispatchers.Main) { onComplete(result) }
+        }
+    }
+
+    fun importProductsFromSheet(products: List<InventoryItem>, onComplete: (ProductSheetImportResult) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val errors = mutableListOf<String>()
+            var importedCount = 0
+            products.forEachIndexed { index, product ->
+                try {
+                    if (product.barcode.isNotBlank() && repository.getItemByBarcode(product.barcode) != null) {
+                        errors += "${product.name}: barcode is already in inventory."
+                        return@forEachIndexed
+                    }
+                    val initialStockTransaction = if (product.currentQuantity > 0) {
+                        StockTransaction(
+                            itemId = 0,
+                            barcode = product.barcode,
+                            itemName = product.name,
+                            changeQuantity = product.currentQuantity,
+                            transactionType = "MANUAL_ADD",
+                            note = "Imported from Google Sheets product template"
+                        )
+                    } else null
+                    repository.saveItemWithTransaction(product, initialStockTransaction)
+                    importedCount++
+                } catch (_: Exception) {
+                    errors += "Row ${index + 2}: ${product.name} could not be saved. Check for duplicate barcodes or SKUs."
+                }
+            }
+            if (importedCount > 0) {
+                withContext(Dispatchers.Main) {
+                    triggerNotification("Imported $importedCount products from the sheet.", "SUCCESS")
+                }
+                checkLowStockAlerts()
+            }
+            withContext(Dispatchers.Main) {
+                onComplete(ProductSheetImportResult(importedCount, errors))
             }
         }
     }
@@ -494,6 +581,72 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             )
             
             triggerNotification("Updated pricing for ${item.name}: $${String.format(Locale.getDefault(), "%.2f", finalPrice)}", "SUCCESS")
+        }
+    }
+
+    fun createBillingSession(customerName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val normalizedName = customerName.trim().ifBlank { "Walk-in customer" }
+            val now = System.currentTimeMillis()
+            val sessionId = db.inventoryDao().insertBillingSession(
+                BillingSession(customerName = normalizedName, createdAt = now, updatedAt = now)
+            )
+            withContext(Dispatchers.Main) { _activeBillingSessionId.value = sessionId }
+        }
+    }
+
+    fun selectBillingSession(sessionId: Long?) {
+        _activeBillingSessionId.value = sessionId
+    }
+
+    fun addItemToBillingSession(
+        sessionId: Long,
+        itemId: Long,
+        quantity: Int,
+        onComplete: (String?) -> Unit
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val error = db.inventoryDao().addItemToBillingSession(sessionId, itemId, quantity)
+            withContext(Dispatchers.Main) { onComplete(error) }
+        }
+    }
+
+    fun setBillingSessionItemQuantity(
+        sessionId: Long,
+        itemId: Long,
+        quantity: Int,
+        onComplete: (String?) -> Unit
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val error = db.inventoryDao().setBillingSessionItemQuantity(sessionId, itemId, quantity)
+            withContext(Dispatchers.Main) { onComplete(error) }
+        }
+    }
+
+    fun setBillingSessionDiscount(sessionId: Long, discountType: String, discountValue: Double, onComplete: (String?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val error = db.inventoryDao().setBillingSessionDiscount(sessionId, discountType, discountValue)
+            withContext(Dispatchers.Main) { onComplete(error) }
+        }
+    }
+
+    fun discardBillingSession(sessionId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.inventoryDao().deleteOpenBillingSession(sessionId)
+            if (_activeBillingSessionId.value == sessionId) {
+                withContext(Dispatchers.Main) { _activeBillingSessionId.value = null }
+            }
+        }
+    }
+
+    fun completeBillingSession(sessionId: Long, onComplete: (String?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val error = db.inventoryDao().completeBillingSession(sessionId)
+            if (error == null) {
+                triggerNotification("Purchase completed. Inventory has been updated.", "SUCCESS")
+                checkLowStockAlerts()
+            }
+            withContext(Dispatchers.Main) { onComplete(error) }
         }
     }
 

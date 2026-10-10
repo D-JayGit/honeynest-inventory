@@ -12,6 +12,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -38,6 +40,8 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -48,6 +52,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import android.Manifest
 import android.content.pm.PackageManager
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -68,6 +74,8 @@ import com.google.mlkit.vision.common.InputImage
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 data class DayStockSummary(
     val dayName: String,
@@ -81,6 +89,9 @@ fun InventoryApp(viewModel: InventoryViewModel) {
     val items by viewModel.allItems.collectAsStateWithLifecycle()
     val transactions by viewModel.allTransactions.collectAsStateWithLifecycle()
     val lowStockList by viewModel.lowStockItems.collectAsStateWithLifecycle()
+    val billingSessions by viewModel.openBillingSessions.collectAsStateWithLifecycle()
+    val completedBillingSessions by viewModel.completedBillingSessions.collectAsStateWithLifecycle()
+    val activeBillingSessionId by viewModel.activeBillingSessionId.collectAsStateWithLifecycle()
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
     val activeSessionId by viewModel.activeSessionId.collectAsStateWithLifecycle()
     val activeRecItems by viewModel.activeReconciliationItems.collectAsStateWithLifecycle()
@@ -145,22 +156,15 @@ fun InventoryApp(viewModel: InventoryViewModel) {
                         )
                     }
                     
-                    // Low Stock Alert badge count
-                    if (lowStockList.isNotEmpty()) {
-                        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(end = 12.dp)) {
-                            Box(
-                                modifier = Modifier
-                                    .size(24.dp)
-                                    .background(MaterialTheme.colorScheme.error, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = lowStockList.size.toString(),
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
+                    IconButton(
+                        onClick = { currentTab = "notifications" },
+                        modifier = Modifier.testTag("action_alerts")
+                    ) {
+                        BadgedBox(badge = {
+                            val alertCount = maxOf(notifications.size, lowStockList.size)
+                            if (alertCount > 0) Badge { Text(alertCount.toString()) }
+                        }) {
+                            Icon(Icons.Default.Notifications, contentDescription = "Alerts")
                         }
                     }
                 },
@@ -210,19 +214,11 @@ fun InventoryApp(viewModel: InventoryViewModel) {
                     modifier = Modifier.testTag("tab_reconciliation")
                 )
                 NavigationBarItem(
-                    selected = currentTab == "notifications",
-                    onClick = { currentTab = "notifications" },
-                    icon = { 
-                        BadgedBox(badge = {
-                            if (notifications.isNotEmpty()) {
-                                Badge { Text(notifications.size.toString()) }
-                            }
-                        }) {
-                            Icon(Icons.Default.Notifications, contentDescription = "Alert logs")
-                        }
-                    },
-                    label = { Text("Alerts", style = MaterialTheme.typography.labelSmall, maxLines = 1) },
-                    modifier = Modifier.testTag("tab_notifications")
+                    selected = currentTab == "history",
+                    onClick = { currentTab = "history" },
+                    icon = { Icon(Icons.Default.History, contentDescription = "Purchase history") },
+                    label = { Text("History", style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                    modifier = Modifier.testTag("tab_history")
                 )
             }
         },
@@ -275,6 +271,7 @@ fun InventoryApp(viewModel: InventoryViewModel) {
                     items = items,
                     lowStockList = lowStockList,
                     transactions = transactions,
+                    completedSales = completedBillingSessions,
                     onEditItem = {
                         editItemTarget = it
                         showAddItemDialog = true
@@ -312,21 +309,37 @@ fun InventoryApp(viewModel: InventoryViewModel) {
                     onAddProductClick = {
                         editItemTarget = null
                         showAddItemDialog = true
-                    }
+                    },
+                    onPreviewProductCsv = viewModel::previewProductSheetCsv,
+                    onImportProducts = viewModel::importProductsFromSheet
                 )
                 "sales" -> SalesTab(
                     items = items,
-                    onUpdatePricing = { item, bp, dp ->
-                        viewModel.updateItemPricing(item, bp, dp)
+                    billingSessions = billingSessions,
+                    activeBillingSessionId = activeBillingSessionId,
+                    onSelectBillingSession = viewModel::selectBillingSession,
+                    onCreateBillingSession = viewModel::createBillingSession,
+                    onAddItem = { sessionId, itemId, quantity, onComplete ->
+                        viewModel.addItemToBillingSession(sessionId, itemId, quantity, onComplete)
+                    },
+                    onSetItemQuantity = { sessionId, itemId, quantity, onComplete ->
+                        viewModel.setBillingSessionItemQuantity(sessionId, itemId, quantity, onComplete)
+                    },
+                    onSetBillingSessionDiscount = { sessionId, discountMode, discountValue, onComplete ->
+                        viewModel.setBillingSessionDiscount(sessionId, discountMode, discountValue, onComplete)
+                    },
+                    onCompleteBillingSession = { sessionId, onComplete ->
+                        viewModel.completeBillingSession(sessionId, onComplete)
                     }
                 )
+                "history" -> PurchaseHistoryTab(completedSales = completedBillingSessions)
                 "scanner" -> ScanTerminalTab(
                     viewModel = viewModel,
                     items = items,
                     activeBarcodeNotFound = viewModel.scannedBarcodeNotFound.collectAsStateWithLifecycle().value,
                     quickScannedItem = viewModel.recentScannedItem.collectAsStateWithLifecycle().value,
                     onAddNewProductFromScan = { barcode ->
-                        val dummyNewItem = InventoryItem(barcode = barcode, name = "", currentQuantity = 1)
+                        val dummyNewItem = InventoryItem(barcode = barcode, name = "", currentQuantity = 1, productCode = "")
                         editItemTarget = dummyNewItem
                         showAddItemDialog = true
                     }
@@ -446,10 +459,13 @@ fun InventoryApp(viewModel: InventoryViewModel) {
                         viewModel.clearScannedState()
                     },
                     lookupState = apiState,
-                    onSave = { barcode, name, desc, cat, qty, threshold, buyPrice, priceList, discPct ->
+                    onSave = { barcode, productCode, colorCode, sizeCode, name, desc, cat, qty, threshold, buyPrice, priceList, discPct ->
                         viewModel.addOrUpdateItem(
                             id = editItemTarget?.id ?: 0,
                             barcode = barcode,
+							productCode = productCode,
+                            colorCode = colorCode,
+                            sizeCode = sizeCode,
                             name = name,
                             description = desc,
                             category = cat,
@@ -472,11 +488,39 @@ fun InventoryApp(viewModel: InventoryViewModel) {
 
 // ---------------- DASHBOARD TAB & CHARTS ----------------
 
+private fun BillingSessionWithItems.salesTotal(): Double =
+    (salesSubtotal() - salesDiscountAmount()).coerceAtLeast(0.0)
+
+private fun BillingSessionWithItems.salesSubtotal(): Double =
+    items.sumOf { it.unitPrice * it.quantity }
+
+private fun BillingSessionWithItems.salesDiscountAmount(): Double = when (session.discountType) {
+    "AMOUNT" -> session.discountValue.coerceIn(0.0, salesSubtotal())
+    else -> salesSubtotal() * session.discountValue.coerceIn(0.0, 100.0) / 100.0
+}
+
+private fun BillingSessionWithItems.salesProfit(): Double =
+    salesTotal() - items.sumOf { it.unitCost * it.quantity }
+
+@Composable
+private fun SalesMetricCard(label: String, amount: Double, modifier: Modifier = Modifier) {
+    Card(modifier = modifier.heightIn(min = 88.dp)) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("₹" + String.format(Locale.getDefault(), "%.2f", amount), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
 @Composable
 fun DashboardTab(
     items: List<InventoryItem>,
     lowStockList: List<InventoryItem>,
     transactions: List<StockTransaction>,
+    completedSales: List<BillingSessionWithItems>,
     onEditItem: (InventoryItem) -> Unit,
     onTriggerNotification: (String, String) -> Unit,
     onDelete: (InventoryItem) -> Unit,
@@ -531,6 +575,27 @@ fun DashboardTab(
     val recSellingPrice = recListPrice * (1.0 - (discountVal / 100.0))
     val profitAmount = recSellingPrice - costVal
 
+    val now = Calendar.getInstance()
+    val todayStart = (now.clone() as Calendar).apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    val monthStart = (now.clone() as Calendar).apply {
+            set(Calendar.DAY_OF_MONTH, 1)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    val todaySales = completedSales.filter { it.session.updatedAt >= todayStart }
+    val monthSales = completedSales.filter { it.session.updatedAt >= monthStart }
+    val todayRevenue = todaySales.sumOf { it.salesTotal() }
+    val todayProfit = todaySales.sumOf { it.salesProfit() }
+    val monthRevenue = monthSales.sumOf { it.salesTotal() }
+    val monthProfit = monthSales.sumOf { it.salesProfit() }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -538,6 +603,25 @@ fun DashboardTab(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Sales analytics", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "Gross profit uses the final bill price after discounts minus saved purchase cost.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SalesMetricCard("Today's sales", todayRevenue, Modifier.weight(1f))
+                    SalesMetricCard("Today's gross profit", todayProfit, Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SalesMetricCard("This month's sales", monthRevenue, Modifier.weight(1f))
+                    SalesMetricCard("This month's gross profit", monthProfit, Modifier.weight(1f))
+                }
+            }
+        }
+
         // 1. Bento Cell: Scan Barcode (Rapid Actions)
         item {
             Card(
@@ -1207,6 +1291,7 @@ fun InventoryItemRow(
     onDecrement: () -> Unit
 ) {
     var expandedActions by remember { mutableStateOf(false) }
+    var showSkuBarcodeLabel by remember { mutableStateOf(false) }
 
     Card(
         colors = CardDefaults.cardColors(
@@ -1299,6 +1384,12 @@ fun InventoryItemRow(
                             color = MaterialTheme.colorScheme.primary
                         )
                     }
+					Text(
+                        text = "SKU: ${item.sku ?: "Pending"}",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
 
                 // Price details
@@ -1395,9 +1486,26 @@ fun InventoryItemRow(
                             }
                         }
                     }
+					Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(
+                            onClick = { showSkuBarcodeLabel = true },
+                            enabled = !item.sku.isNullOrBlank()
+                        ) {
+                            Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Barcode label")
+                        }
+                    }
                 }
             }
         }
+    }
+	if (showSkuBarcodeLabel) {
+        SkuBarcodeLabelDialog(item = item, onDismiss = { showSkuBarcodeLabel = false })
     }
 }
 
@@ -1411,6 +1519,8 @@ fun CameraPreview(
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val lastReportedBarcode = remember { AtomicReference<String?>(null) }
+    val missedBarcodeFrames = remember { AtomicInteger(0) }
     val latestIsScanning by rememberUpdatedState(isScanning)
     val latestOnBarcodeScanned by rememberUpdatedState(onBarcodeScanned)
     val barcodeScanner = remember {
@@ -1455,21 +1565,32 @@ fun CameraPreview(
                         analysis.setAnalyzer(analysisExecutor) { imageProxy ->
                             val mediaImage = imageProxy.image
                             if (mediaImage == null || !latestIsScanning) {
+                                if (!latestIsScanning) {
+                                    lastReportedBarcode.set(null)
+                                    missedBarcodeFrames.set(0)
+                                }
                                 imageProxy.close()
                             } else {
                                 val inputImage = InputImage.fromMediaImage(
                                     mediaImage,
                                     imageProxy.imageInfo.rotationDegrees
                                 )
-                                barcodeScanner.process(inputImage)
+                                    barcodeScanner.process(inputImage)
                                     .addOnSuccessListener { barcodes ->
                                         val barcode = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
-                                        barcode?.rawValue?.let { rawValue ->
-                                            ContextCompat.getMainExecutor(context).execute {
-                                                if (latestIsScanning) {
-                                                    latestOnBarcodeScanned(rawValue)
+                                        val rawValue = barcode?.rawValue
+                                        if (rawValue != null) {
+                                            missedBarcodeFrames.set(0)
+                                            val previousBarcode = lastReportedBarcode.getAndSet(rawValue)
+                                            if (previousBarcode != rawValue) {
+                                                ContextCompat.getMainExecutor(context).execute {
+                                                    if (latestIsScanning) {
+                                                        latestOnBarcodeScanned(rawValue)
+                                                    }
                                                 }
                                             }
+                                        } else if (missedBarcodeFrames.incrementAndGet() >= 4) {
+                                            lastReportedBarcode.set(null)
                                         }
                                     }
                                     .addOnCompleteListener {
@@ -2534,6 +2655,9 @@ fun AddEditProductDialog(
     lookupState: ApiLookupState = ApiLookupState.Idle,
     onSave: (
         barcode: String,
+		productCode: String,
+        colorCode: String,
+        sizeCode: String,
         name: String,
         desc: String,
         cat: String,
@@ -2544,9 +2668,13 @@ fun AddEditProductDialog(
         discPct: Double
     ) -> Unit
 ) {
+	val isCreating = initialItem == null || initialItem.id == 0L
     // Reset or update state when initialItem changes (crucial for prefill to reflect instantly in the state!)
     var name by remember(initialItem) { mutableStateOf(initialItem?.name ?: "") }
     var barcode by remember(initialItem) { mutableStateOf(initialItem?.barcode ?: "") }
+	var productCode by remember(initialItem) { mutableStateOf(if (initialItem == null) "" else initialItem.productCode) }
+    var colorCode by remember(initialItem) { mutableStateOf(initialItem?.colorCode ?: "NA") }
+    var sizeCode by remember(initialItem) { mutableStateOf(initialItem?.sizeCode ?: "NA") }
     var description by remember(initialItem) { mutableStateOf(initialItem?.description ?: "") }
     var category by remember(initialItem) { mutableStateOf(initialItem?.category ?: "General") }
     var currentQuantityStr by remember(initialItem) { mutableStateOf(initialItem?.currentQuantity?.toString() ?: "10") }
@@ -2576,18 +2704,25 @@ fun AddEditProductDialog(
             Column(
                 modifier = Modifier
                     .padding(20.dp)
-                    .verticalScrollPadding(),
+                    .fillMaxWidth()
+                    .heightIn(max = 720.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Text(
-                    text = if (initialItem == null || initialItem.name.isEmpty()) "Register New SKU" else "Modify Product Details",
+                    text = if (isCreating) "Register New SKU" else "Modify Product Details",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
 
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
                 // Advanced Barcode API registry status banners
-                if (initialItem == null || initialItem.name.isEmpty()) {
+                if (isCreating) {
                     when (lookupState) {
                         is ApiLookupState.Loading -> {
                             Row(
@@ -2664,13 +2799,13 @@ fun AddEditProductDialog(
                 OutlinedTextField(
                     value = barcode,
                     onValueChange = { barcode = it },
-                    label = { Text("Product Barcode ID") },
+                    label = { Text("Existing Barcode / GTIN (optional)") },
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("input_barcode"),
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
                 )
 
                 OutlinedTextField(
@@ -2690,6 +2825,58 @@ fun AddEditProductDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
+				if (isCreating) {
+                    Text(
+                        "SKU components (use NA when color or size does not apply)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+
+                OutlinedTextField(
+				value = productCode,
+                            onValueChange = { productCode = it.filter { char -> char.isLetterOrDigit() }.take(2).uppercase(Locale.ROOT) },
+                            label = { Text("Product code") },
+                            placeholder = { Text("MJ") },
+                            modifier = Modifier.weight(1f).testTag("input_product_code"),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = colorCode,
+                            onValueChange = { colorCode = it.filter { char -> char.isLetterOrDigit() }.take(2).uppercase(Locale.ROOT) },
+                            label = { Text("Color") },
+                            placeholder = { Text("BE") },
+                            modifier = Modifier.weight(1f).testTag("input_color_code"),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = sizeCode,
+                            onValueChange = { sizeCode = it.filter { char -> char.isLetterOrDigit() }.take(4).uppercase(Locale.ROOT) },
+                            label = { Text("Size") },
+                            placeholder = { Text("36") },
+                            modifier = Modifier.weight(1f).testTag("input_size_code"),
+                            singleLine = true
+                        )
+                    }
+                    Text(
+                        text = "SKU after save: ${SkuGenerator.preview(productCode, colorCode, sizeCode)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = initialItem?.sku.orEmpty(),
+                        onValueChange = {},
+                        label = { Text("SKU (fixed for this product variant)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        readOnly = true,
+                        singleLine = true
+                    )
+                }
 
                 OutlinedTextField(
                     value = description,
@@ -2735,7 +2922,7 @@ fun AddEditProductDialog(
                     OutlinedTextField(
                         value = buyPriceStr,
                         onValueChange = { buyPriceStr = it },
-                        label = { Text("Cost Price ($)") },
+                        label = { Text("Cost Price") },
                         modifier = Modifier
                             .weight(1f)
                             .testTag("input_cost"),
@@ -2746,7 +2933,7 @@ fun AddEditProductDialog(
                     OutlinedTextField(
                         value = listPriceStr,
                         onValueChange = { listPriceStr = it },
-                        label = { Text("List Rate ($)") },
+                        label = { Text("List Rate") },
                         modifier = Modifier
                             .weight(1f)
                             .testTag("input_list"),
@@ -2780,12 +2967,13 @@ fun AddEditProductDialog(
                     ) {
                         Text("Calculated Selling Price:", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                         Text(
-                            text = "$${String.format(Locale.getDefault(), "%.2f", computedSellingPrice)}",
+                            text = "${String.format(Locale.getDefault(), "%.2f", computedSellingPrice)}",
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary,
                             style = MaterialTheme.typography.titleMedium
                         )
                     }
+                }
                 }
 
                 // Action buttons
@@ -2799,20 +2987,24 @@ fun AddEditProductDialog(
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(
+					 enabled = name.isNotBlank() && SkuGenerator.isValidComponents(productCode, colorCode, sizeCode),
                         onClick = {
-                            if (barcode.isNotEmpty() && name.isNotEmpty()) {
-                                onSave(
-                                    barcode,
-                                    name,
-                                    description,
-                                    category,
+						onSave(
+								barcode,
+                                productCode,
+                                colorCode,
+                                sizeCode,
+                                name,
+                                description,
+                                category,
+                            
                                     currentQuantityStr.toIntOrNull() ?: 0,
                                     thresholdStr.toIntOrNull() ?: 5,
                                     buyPriceStr.toDoubleOrNull() ?: 0.0,
                                     listPriceStr.toDoubleOrNull() ?: 0.0,
                                     discountStr.toDoubleOrNull() ?: 0.0
                                 )
-                            }
+                            
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                         modifier = Modifier.testTag("save_item_button")
@@ -3038,17 +3230,35 @@ fun LedgerTab(
     onDelete: (InventoryItem) -> Unit,
     onDeleteAll: () -> Unit,
     onQuickStockChange: (InventoryItem, Int) -> Unit,
-    onAddProductClick: () -> Unit
+    onAddProductClick: () -> Unit,
+    onPreviewProductCsv: (String, (ProductSheetPreview) -> Unit) -> Unit,
+    onImportProducts: (List<InventoryItem>, (ProductSheetImportResult) -> Unit) -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
+    var selectedCategory by rememberSaveable { mutableStateOf("All") }
     var showDeleteAllConfirm by remember { mutableStateOf(false) }
+    var showBulkSkuLabels by remember { mutableStateOf(false) }
 
-    val filteredItems = remember(items, searchQuery) {
-        items.filter {
-            it.name.contains(searchQuery, ignoreCase = true) ||
-            it.barcode.contains(searchQuery, ignoreCase = true) ||
-            it.category.contains(searchQuery, ignoreCase = true)
+    val filteredItems = remember(items, searchQuery, selectedCategory) {
+        items.filter { item ->
+            val matchesSearch =
+                item.name.contains(searchQuery, ignoreCase = true) ||
+                        item.barcode.contains(searchQuery, ignoreCase = true) ||
+                        item.category.contains(searchQuery, ignoreCase = true)
+
+            val matchesCategory =
+                selectedCategory == "All" ||
+                        item.category.trim() == selectedCategory
+
+            matchesSearch && matchesCategory
         }
+    }
+    val categories = remember(items) {
+        listOf("All") + items
+            .map { it.category.trim() }
+            .filter { it.isNotEmpty() && it != "All" }
+            .distinct()
+            .sorted()
     }
 
     if (showDeleteAllConfirm) {
@@ -3075,12 +3285,44 @@ fun LedgerTab(
         )
     }
 
+    if (showBulkSkuLabels) {
+        BulkSkuBarcodeLabelDialog(
+            items = items,
+            onDismiss = { showBulkSkuLabels = false }
+        )
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Bulk upload products", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    "Download the template, fill it in Google Sheets, then export as CSV. Selling price is calculated from MRP and discount; blank barcodes get an app-generated SKU barcode.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                BulkProductSheetActions(
+                    onPreviewCsv = onPreviewProductCsv,
+                    onImportProducts = onImportProducts
+                )
+            }
+        }
+        item {
+            OutlinedButton(
+                onClick = { showBulkSkuLabels = true },
+                enabled = items.any { !it.sku.isNullOrBlank() },
+                modifier = Modifier.fillMaxWidth().testTag("bulk_print_sku_labels")
+            ) {
+                Icon(Icons.Default.Print, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Bulk print SKU labels")
+            }
+        }
         item {
             Card(
                 colors = CardDefaults.cardColors(
@@ -3164,6 +3406,18 @@ fun LedgerTab(
             )
         }
 
+        item {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(categories) { category ->
+                    FilterChip(
+                        selected = selectedCategory == category,
+                        onClick = { selectedCategory = category },
+                        label = { Text(category) }
+                    )
+                }
+            }
+        }
+
         // Loaded Items
         if (filteredItems.isEmpty()) {
             item {
@@ -3207,235 +3461,531 @@ fun LedgerTab(
     }
 }
 
-// ================== SALES SECTION TAB ==================
 @Composable
-fun SalesTab(
-    items: List<InventoryItem>,
-    onUpdatePricing: (InventoryItem, Double, Double) -> Unit
-) {
-    var searchQuery by remember { mutableStateOf("") }
-    val filteredItems = remember(items, searchQuery) {
-        items.filter {
-            it.name.contains(searchQuery, ignoreCase = true) ||
-            it.barcode.contains(searchQuery, ignoreCase = true) ||
-            it.category.contains(searchQuery, ignoreCase = true)
-        }
-    }
-
+fun PurchaseHistoryTab(completedSales: List<BillingSessionWithItems>) {
     LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        modifier = Modifier.fillMaxSize().testTag("purchase_history_root"),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
-                ),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Sales Manager & Discounts",
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.tertiary
-                    )
-                    Text(
-                        text = "Manage base selling rates and configure percentage-based discounts. The final client pricing will update immediately on save.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
-                    )
-                }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Purchase history", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("Completed customer bills and their saved totals.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-
-        // Search Bar for identifying items
-        item {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Search product name or barcode...") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search Icon") },
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.tertiary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                ),
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear Search")
-                        }
-                    }
-                }
-            )
-        }
-
-        if (filteredItems.isEmpty()) {
+        if (completedSales.isEmpty()) {
             item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 48.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("No products registered. Create them in Ledger first.", color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text("Completed customer purchases will appear here.", modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         } else {
-            items(filteredItems) { item ->
-                SalesPricingCard(
-                    item = item,
-                    onSavePricing = { basePrice, discount ->
-                        onUpdatePricing(item, basePrice, discount)
+            items(completedSales, key = { "sale-history-${it.session.id}" }) { sale ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(sale.session.customerName, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date(sale.session.updatedAt)),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text("₹" + String.format(Locale.getDefault(), "%.2f", sale.salesTotal()), fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Gross profit ₹" + String.format(Locale.getDefault(), "%.2f", sale.salesProfit()),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        Text("Subtotal ₹" + String.format(Locale.getDefault(), "%.2f", sale.salesSubtotal()), style = MaterialTheme.typography.bodySmall)
+                        if (sale.session.discountValue > 0.0) {
+                            Text(
+                                "Discount " + if (sale.session.discountType == "AMOUNT") {
+                                    "₹" + String.format(Locale.getDefault(), "%.2f", sale.session.discountValue)
+                                } else {
+                                    String.format(Locale.getDefault(), "%.2f", sale.session.discountValue) + "%"
+                                } + " · −₹" + String.format(Locale.getDefault(), "%.2f", sale.salesDiscountAmount()),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        HorizontalDivider()
+                        sale.items.forEach { soldItem ->
+                            Text(
+                                "${soldItem.quantity} × ${soldItem.productName} · ₹" + String.format(Locale.getDefault(), "%.2f", soldItem.unitPrice),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                     }
-                )
+                }
             }
         }
     }
 }
 
+// ================== SALES SECTION TAB ==================
 @Composable
-fun SalesPricingCard(
-    item: InventoryItem,
-    onSavePricing: (Double, Double) -> Unit
+fun SalesTab(
+    items: List<InventoryItem>,
+    billingSessions: List<BillingSessionWithItems>,
+    activeBillingSessionId: Long?,
+    onSelectBillingSession: (Long?) -> Unit,
+    onCreateBillingSession: (String) -> Unit,
+    onAddItem: (Long, Long, Int, (String?) -> Unit) -> Unit,
+    onSetItemQuantity: (Long, Long, Int, (String?) -> Unit) -> Unit,
+    onSetBillingSessionDiscount: (Long, String, Double, (String?) -> Unit) -> Unit,
+    onCompleteBillingSession: (Long, (String?) -> Unit) -> Unit
 ) {
-    // Pricing States
-    var basePriceStr by remember(item.listPrice) { mutableStateOf(String.format(Locale.US, "%.2f", item.listPrice)) }
-    var discountStr by remember(item.discountPercentage) { mutableStateOf(String.format(Locale.US, "%.1f", item.discountPercentage)) }
+    val context = LocalContext.current
+    val hapticFeedback = LocalHapticFeedback.current
+    var barcodeEntry by remember { mutableStateOf("") }
+    var manualSearch by remember { mutableStateOf("") }
+    var quantityEntry by remember { mutableStateOf("1") }
+    var message by remember { mutableStateOf<String?>(null) }
+    var isCheckingOut by remember { mutableStateOf(false) }
+    var isApplyingDiscount by remember { mutableStateOf(false) }
+    var discountMode by remember { mutableStateOf("PERCENTAGE") }
+    var discountEntry by remember { mutableStateOf("0") }
+    var showNewSessionDialog by remember { mutableStateOf(false) }
+    var customerName by remember { mutableStateOf("") }
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    var showCamera by remember { mutableStateOf(hasCameraPermission) }
+    var cameraScanning by remember { mutableStateOf(hasCameraPermission) }
 
-    // Live calculation helper
-    val finalSalePrice = remember(basePriceStr, discountStr) {
-        val bp = basePriceStr.toDoubleOrNull() ?: 0.0
-        val dp = discountStr.toDoubleOrNull() ?: 0.0
-        if (dp > 0.0) bp * (1.0 - dp / 100.0) else bp
+    val activeSession = billingSessions.firstOrNull { it.session.id == activeBillingSessionId }
+        ?: billingSessions.firstOrNull()
+    val billItems = activeSession?.items.orEmpty()
+    val subtotal = billItems.sumOf { it.unitPrice * it.quantity }
+    val enteredDiscount = discountEntry.toDoubleOrNull()
+    val discountIsValid = enteredDiscount != null && enteredDiscount >= 0.0 && when (discountMode) {
+        "AMOUNT" -> enteredDiscount <= subtotal
+        else -> enteredDiscount <= 100.0
+    }
+    val previewDiscount = if (discountIsValid) enteredDiscount!! else 0.0
+    val discountAmount = if (discountMode == "AMOUNT") previewDiscount.coerceAtMost(subtotal) else subtotal * previewDiscount / 100.0
+    val total = (subtotal - discountAmount).coerceAtLeast(0.0)
+    val savedDiscountMode = activeSession?.session?.discountType ?: "PERCENTAGE"
+    val savedDiscount = activeSession?.session?.discountValue ?: 0.0
+    val discountIsApplied = discountIsValid && discountMode == savedDiscountMode && previewDiscount == savedDiscount
+    val quantitiesByItem = billItems.associate { it.itemId to it.quantity }
+
+    LaunchedEffect(activeSession?.session?.id) {
+        discountMode = activeSession?.session?.discountType ?: "PERCENTAGE"
+        discountEntry = activeSession?.session?.discountValue?.toString() ?: "0"
     }
 
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        shape = RoundedCornerShape(14.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-        modifier = Modifier.fillMaxWidth()
+    LaunchedEffect(billingSessions, activeBillingSessionId) {
+        if (billingSessions.none { it.session.id == activeBillingSessionId }) {
+            onSelectBillingSession(billingSessions.firstOrNull()?.session?.id)
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCameraPermission = granted
+        if (granted) {
+            showCamera = true
+            cameraScanning = true
+        } else {
+            message = "Camera permission is needed to scan barcodes. Manual entry is available below."
+        }
+    }
+
+    fun addItemToBill(item: InventoryItem, quantity: Int, scanned: Boolean = false) {
+        val session = activeSession?.session
+        if (session == null) {
+            message = "Create a customer bill before adding products."
+            return
+        }
+        if (quantity <= 0) {
+            message = "Enter a quantity greater than zero."
+            return
+        }
+        onAddItem(session.id, item.id, quantity) { error ->
+            message = error ?: (item.name + " added to " + session.customerName + "'s bill.")
+            if (error == null) {
+                manualSearch = ""
+                if (scanned) hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+            }
+        }
+    }
+
+    fun addBarcodeToBill(codeValue: String, scanned: Boolean) {
+        val code = codeValue.trim()
+        if (code.isBlank()) {
+            message = "Scan or enter a barcode or SKU first."
+            return
+        }
+        val item = items.firstOrNull {
+            it.barcode.equals(code, ignoreCase = true) || it.sku.equals(code, ignoreCase = true)
+        }
+        if (item == null) {
+            message = "No inventory item matches " + code + "."
+            return
+        }
+        addItemToBill(item, quantityEntry.toIntOrNull() ?: 1, scanned)
+        barcodeEntry = ""
+    }
+
+    val manualMatches = if (manualSearch.isBlank()) emptyList() else items.filter {
+        it.name.contains(manualSearch, ignoreCase = true) ||
+            it.barcode.contains(manualSearch, ignoreCase = true) ||
+            it.sku?.contains(manualSearch, ignoreCase = true) == true
+    }.take(8)
+
+    if (showNewSessionDialog) {
+        AlertDialog(
+            onDismissRequest = { showNewSessionDialog = false },
+            title = { Text("New customer bill") },
+            text = {
+                OutlinedTextField(
+                    value = customerName,
+                    onValueChange = { customerName = it },
+                    label = { Text("Customer name") },
+                    placeholder = { Text("Walk-in customer") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onCreateBillingSession(customerName.ifBlank { "Walk-in customer" })
+                        customerName = ""
+                        showNewSessionDialog = false
+                        message = null
+                    }
+                ) { Text("Start bill") }
+            },
+            dismissButton = { TextButton(onClick = { showNewSessionDialog = false }) { Text("Cancel") } }
+        )
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
+        LazyColumn(
+            modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = item.name,
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "Barcode: ${item.barcode} | stock: ${item.currentQuantity}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                
-                // Final Sale Price bubble
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = if (item.discountPercentage > 0) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.tertiaryContainer,
-                    modifier = Modifier.padding(start = 8.dp)
+            item {
+                Text("Billing", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("Open customer bills stay saved while you move between tabs.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        horizontalAlignment = Alignment.End
-                    ) {
+                    OutlinedButton(onClick = { showNewSessionDialog = true }) {
+                        Icon(Icons.Default.PersonAdd, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("New customer")
+                    }
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(billingSessions, key = { "bill-${it.session.id}" }) { session ->
+                            FilterChip(
+                                selected = session.session.id == activeSession?.session?.id,
+                                onClick = { onSelectBillingSession(session.session.id); message = null },
+                                label = { Text(session.session.customerName + " · " + session.items.size) }
+                            )
+                        }
+                    }
+                }
+            }
+            if (activeSession == null) {
+                item {
+                    Card(modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            text = "Sale Rate",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontSize = 8.sp,
-                            color = if (item.discountPercentage > 0) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onTertiaryContainer
-                        )
-                        Text(
-                            text = "$${String.format(Locale.US, "%.2f", item.sellingPrice)}",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = if (item.discountPercentage > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary
+                            "Start a customer bill to scan or add products.",
+                            modifier = Modifier.padding(16.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
             }
-
-            Divider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Base Selling Price enter field
-                OutlinedTextField(
-                    value = basePriceStr,
-                    onValueChange = { basePriceStr = it },
-                    label = { Text("Base Price ($)") },
-                    textStyle = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
-                )
-
-                // Discount percentage enter field
-                OutlinedTextField(
-                    value = discountStr,
-                    onValueChange = { discountStr = it },
-                    label = { Text("Discount (%)") },
-                    textStyle = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
-                )
-
-                // Save button
-                IconButton(
-                    onClick = {
-                        val bp = basePriceStr.toDoubleOrNull() ?: 0.0
-                        val dp = discountStr.toDoubleOrNull() ?: 0.0
-                        onSavePricing(bp, dp)
-                    },
-                    modifier = Modifier
-                        .background(MaterialTheme.colorScheme.primary, CircleShape)
-                        .size(48.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "Apply Pricing",
-                        tint = MaterialTheme.colorScheme.onPrimary
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f)
                     )
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                if (activeSession == null) {
+                                    message = "Start a customer bill before scanning products."
+                                } else if (hasCameraPermission) {
+                                    if (showCamera) {
+                                        showCamera = false
+                                        cameraScanning = false
+                                    } else {
+                                        showCamera = true
+                                        cameraScanning = true
+                                    }
+                                } else {
+                                    permissionLauncher.launch(Manifest.permission.CAMERA)
+                                }
+                            },
+                            enabled = activeSession != null,
+                            modifier = Modifier.fillMaxWidth().height(56.dp).testTag("billing_scan_with_camera")
+                        ) {
+                            Icon(Icons.Default.CameraAlt, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (showCamera) "Hide camera scanner" else "Scan product with camera")
+                        }
+                        if (showCamera && hasCameraPermission && activeSession != null) {
+                            Box(Modifier.fillMaxWidth().height(230.dp).clip(RoundedCornerShape(12.dp)).background(Color.Black)) {
+                                CameraPreview(
+                                    isScanning = cameraScanning,
+                                    onBarcodeScanned = { code ->
+                                        barcodeEntry = code
+                                        addBarcodeToBill(code, scanned = true)
+                                    },
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                Text(
+                                    "Point the camera at a product barcode",
+                                    color = Color.White,
+                                    modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp)
+                                )
+                            }
+                        }
+                        Text("Or add by barcode/SKU", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = barcodeEntry,
+                            onValueChange = { barcodeEntry = it },
+                            modifier = Modifier.fillMaxWidth().testTag("billing_barcode"),
+                            label = { Text("Enter barcode or SKU") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                            enabled = activeSession != null
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = quantityEntry,
+                                onValueChange = { quantityEntry = it.filter(Char::isDigit).take(4) },
+                                modifier = Modifier.width(96.dp).testTag("billing_quantity"),
+                                label = { Text("Qty") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                enabled = activeSession != null
+                            )
+                            OutlinedButton(
+                                onClick = { addBarcodeToBill(barcodeEntry, scanned = true) },
+                                enabled = activeSession != null,
+                                modifier = Modifier.testTag("billing_add_barcode")
+                            ) { Text("Add by barcode") }
+                        }
+                    }
                 }
             }
-
-            // Live simulation helper below editing fields
-            val listPrice = basePriceStr.toDoubleOrNull() ?: 0.0
-            val discPct = discountStr.toDoubleOrNull() ?: 0.0
-            if (listPrice != item.listPrice || discPct != item.discountPercentage) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Unsaved changes: Final will be $${String.format(Locale.US, "%.2f", finalSalePrice)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
-                    )
+            item {
+                OutlinedTextField(
+                    value = manualSearch,
+                    onValueChange = { manualSearch = it },
+                    modifier = Modifier.fillMaxWidth().testTag("billing_manual_search"),
+                    label = { Text("Find product by name, barcode, or SKU") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    singleLine = true,
+                    enabled = activeSession != null
+                )
+            }
+            items(manualMatches, key = { "manual-${it.id}" }) { item ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(item.name, fontWeight = FontWeight.SemiBold)
+                            Text("Stock: " + item.currentQuantity + " · ₹" + String.format(Locale.getDefault(), "%.2f", item.sellingPrice) + " each", style = MaterialTheme.typography.bodySmall)
+                        }
+                        TextButton(
+                            onClick = { addItemToBill(item, quantityEntry.toIntOrNull() ?: 1) },
+                            enabled = item.currentQuantity > (quantitiesByItem[item.id] ?: 0) && activeSession != null
+                        ) { Text("Add") }
+                    }
                 }
+            }
+            item {
+                Text(
+                    if (activeSession == null) "Current bill" else "Current bill · " + activeSession.session.customerName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            if (billItems.isEmpty()) {
+                item {
+                    Text("No items added to this bill yet.", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                }
+            } else {
+                items(billItems, key = { "bill-line-${it.itemId}" }) { line ->
+                    val inStock = items.firstOrNull { it.id == line.itemId }?.currentQuantity ?: 0
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(line.productName, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    line.quantity.toString() + " × ₹" + String.format(Locale.getDefault(), "%.2f", line.unitPrice) + " = ₹" + String.format(Locale.getDefault(), "%.2f", line.quantity * line.unitPrice),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    onSetItemQuantity(activeSession!!.session.id, line.itemId, line.quantity - 1) { error -> message = error }
+                                }
+                            ) { Icon(Icons.Default.Remove, contentDescription = "Remove one " + line.productName) }
+                            Text(line.quantity.toString(), modifier = Modifier.padding(horizontal = 4.dp))
+                            IconButton(
+                                onClick = {
+                                    onSetItemQuantity(activeSession!!.session.id, line.itemId, line.quantity + 1) { error -> message = error }
+                                },
+                                enabled = line.quantity < inStock
+                            ) { Icon(Icons.Default.Add, contentDescription = "Add one " + line.productName) }
+                            IconButton(
+                                onClick = {
+                                    onSetItemQuantity(activeSession!!.session.id, line.itemId, 0) { error -> message = error }
+                                }
+                            ) {
+                                Icon(Icons.Default.DeleteOutline, contentDescription = "Remove " + line.productName + " from bill", tint = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+            }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("Bill discount", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = discountMode == "PERCENTAGE",
+                                onClick = { discountMode = "PERCENTAGE" },
+                                label = { Text("Percentage") },
+                                enabled = activeSession != null && !isCheckingOut
+                            )
+                            FilterChip(
+                                selected = discountMode == "AMOUNT",
+                                onClick = { discountMode = "AMOUNT" },
+                                label = { Text("Amount") },
+                                enabled = activeSession != null && !isCheckingOut
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = discountEntry,
+                                onValueChange = { input ->
+                                    val filtered = input.filter { it.isDigit() || it == '.' }
+                                    val decimalIndex = filtered.indexOf('.')
+                                    discountEntry = if (decimalIndex < 0) filtered.take(8) else {
+                                        filtered.substring(0, decimalIndex).take(8) + "." +
+                                            filtered.substring(decimalIndex + 1).replace(".", "").take(2)
+                                    }
+                                },
+                                modifier = Modifier.weight(1f).testTag("billing_discount_value"),
+                                label = { Text(if (discountMode == "AMOUNT") "Discount amount" else "Discount (%)") },
+                                prefix = { if (discountMode == "AMOUNT") Text("₹") },
+                                suffix = { if (discountMode == "PERCENTAGE") Text("%") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                enabled = activeSession != null && !isCheckingOut
+                            )
+                            Button(
+                                onClick = {
+                                    val percent = enteredDiscount
+                                    if (percent == null || !discountIsValid) {
+                                        message = if (discountMode == "AMOUNT") {
+                                            "Discount amount must be between ₹0 and the bill subtotal."
+                                        } else {
+                                            "Percentage discount must be between 0% and 100%."
+                                        }
+                                    } else if (activeSession != null) {
+                                        isApplyingDiscount = true
+                                        onSetBillingSessionDiscount(activeSession.session.id, discountMode, percent) { error ->
+                                            isApplyingDiscount = false
+                                            message = error ?: "Discount applied to this bill."
+                                        }
+                                    }
+                                },
+                                enabled = activeSession != null && discountIsValid && !discountIsApplied && !isApplyingDiscount && !isCheckingOut
+                            ) { Text(if (isApplyingDiscount) "Saving…" else "Apply") }
+                        }
+                        if (!discountIsValid) {
+                            Text(
+                                if (discountMode == "AMOUNT") "Enter an amount no greater than the subtotal." else "Enter a percentage from 0% to 100%.",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        } else if (!discountIsApplied) {
+                            Text("Apply the discount before completing the bill.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+            if (message != null) {
+                item { Text(message.orEmpty(), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
+            }
+        }
+
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Subtotal ₹" + String.format(Locale.getDefault(), "%.2f", subtotal), style = MaterialTheme.typography.bodySmall)
+                    Text("Discount −₹" + String.format(Locale.getDefault(), "%.2f", discountAmount), style = MaterialTheme.typography.bodySmall)
+                    Text("Final price", style = MaterialTheme.typography.labelLarge)
+                    Text("₹" + String.format(Locale.getDefault(), "%.2f", total), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                }
+                Button(
+                    onClick = {
+                        val session = activeSession?.session
+                        if (session == null) {
+                            message = "Start a customer bill before completing a purchase."
+                        } else if (billItems.isEmpty()) {
+                            message = "Add at least one product before completing the purchase."
+                        } else {
+                            isCheckingOut = true
+                            onCompleteBillingSession(session.id) { error ->
+                                isCheckingOut = false
+                                message = error ?: ("Purchase completed for " + session.customerName + ". Start or select another customer bill.")
+                            }
+                        }
+                    },
+                    enabled = billItems.isNotEmpty() && activeSession != null && discountIsApplied && !isCheckingOut && !isApplyingDiscount,
+                    modifier = Modifier.testTag("billing_complete_purchase")
+                ) { Text(if (isCheckingOut) "Processing…" else "Complete purchase") }
             }
         }
     }

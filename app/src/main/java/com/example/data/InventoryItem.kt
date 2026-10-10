@@ -4,7 +4,7 @@ import androidx.room.*
 
 @Entity(
     tableName = "inventory_items",
-    indices = [Index(value = ["barcode"], unique = true)]
+    indices = [Index(value = ["barcode"], unique = true), Index(value = ["sku"], unique = true)]
 )
 data class InventoryItem(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -18,5 +18,10 @@ data class InventoryItem(
     val sellingPrice: Double = 0.0,
     val listPrice: Double = 0.0, // used if we calculate selling price using discount
     val discountPercentage: Double = 0.0, // if > 0, sellingPrice = listPrice * (1 - discountPercentage/100)
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val productCode: String = "GN",
+    val colorCode: String = "NA",
+    val sizeCode: String = "NA",
+    val sku: String? = null
+
 )

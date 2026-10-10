@@ -12,9 +12,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         InventoryItem::class,
         StockTransaction::class,
         ReconciliationSession::class,
-        ReconciliationItem::class
+        ReconciliationItem::class,
+        BillingSession::class,
+        BillingSessionItem::class
     ],
-    version = 2,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -31,27 +33,67 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "inventory_database"
                 )
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_3_5, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance
                 instance
             }
         }
 
-        private val MIGRATION_1_2 = object : Migration(1, 2) {
+        private val MIGRATION_3_5 = object : Migration(3, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) = createBillingTables(db)
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) = createBillingTables(db)
+        }
+
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Preserve legacy records if a prior version allowed duplicate barcodes.
-                // The retained barcode keeps the earliest item; later records are clearly marked
-                // for user review rather than being discarded or preventing the upgrade.
+                db.execSQL("ALTER TABLE billing_session_items ADD COLUMN unitCost REAL NOT NULL DEFAULT 0.0")
                 db.execSQL(
-                    "UPDATE inventory_items SET barcode = barcode || '-duplicate-' || id " +
-                        "WHERE id NOT IN (SELECT MIN(id) FROM inventory_items GROUP BY barcode)"
-                )
-                db.execSQL(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS index_inventory_items_barcode " +
-                        "ON inventory_items (barcode)"
+                    "UPDATE billing_session_items SET unitCost = " +
+                        "COALESCE((SELECT purchasePrice FROM inventory_items WHERE inventory_items.id = billing_session_items.itemId), 0.0)"
                 )
             }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE billing_sessions ADD COLUMN discountPercentage REAL NOT NULL DEFAULT 0.0")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE billing_sessions ADD COLUMN discountType TEXT NOT NULL DEFAULT 'PERCENTAGE'")
+                db.execSQL("ALTER TABLE billing_sessions ADD COLUMN discountValue REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("UPDATE billing_sessions SET discountValue = discountPercentage")
+            }
+        }
+
+        private fun createBillingTables(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS billing_sessions (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "customerName TEXT NOT NULL, " +
+                    "createdAt INTEGER NOT NULL, " +
+                    "updatedAt INTEGER NOT NULL, " +
+                    "status TEXT NOT NULL)"
+            )
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS billing_session_items (" +
+                    "sessionId INTEGER NOT NULL, " +
+                    "itemId INTEGER NOT NULL, " +
+                    "productName TEXT NOT NULL, " +
+                    "barcode TEXT NOT NULL, " +
+                    "sku TEXT, " +
+                    "unitPrice REAL NOT NULL, " +
+                    "quantity INTEGER NOT NULL, " +
+                    "PRIMARY KEY(sessionId, itemId), " +
+                    "FOREIGN KEY(sessionId) REFERENCES billing_sessions(id) ON UPDATE NO ACTION ON DELETE CASCADE)"
+            )
         }
     }
 }
