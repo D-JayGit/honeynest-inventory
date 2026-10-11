@@ -52,6 +52,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.testTag
@@ -75,6 +76,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 data class DayStockSummary(
@@ -459,12 +461,13 @@ fun InventoryApp(viewModel: InventoryViewModel) {
                         viewModel.clearScannedState()
                     },
                     lookupState = apiState,
-                    onSave = { barcode, productCode, colorCode, sizeCode, name, desc, cat, qty, threshold, buyPrice, priceList, discPct ->
+                    onSave = { barcode, productCode, colorCode, colorName, sizeCode, name, desc, cat, qty, threshold, buyPrice, priceList, discPct ->
                         viewModel.addOrUpdateItem(
                             id = editItemTarget?.id ?: 0,
                             barcode = barcode,
 							productCode = productCode,
                             colorCode = colorCode,
+                            colorName = colorName,
                             sizeCode = sizeCode,
                             name = name,
                             description = desc,
@@ -501,6 +504,19 @@ private fun BillingSessionWithItems.salesDiscountAmount(): Double = when (sessio
 
 private fun BillingSessionWithItems.salesProfit(): Double =
     salesTotal() - items.sumOf { it.unitCost * it.quantity }
+
+private data class DailySalesSummary(
+    val dayStart: Long,
+    val sales: Double,
+    val profit: Double
+)
+
+private fun InventoryItem.variantDescription(): String = listOfNotNull(
+    colorCode.takeUnless { it.isBlank() || it.equals("NA", ignoreCase = true) }
+        ?.let { "Color: ${ProductColorCatalog.displayLabel(it, colorName)}" },
+    sizeCode.takeUnless { it.isBlank() || it.equals("NA", ignoreCase = true) }
+        ?.let { "Size: ${ProductSizeCatalog.displayLabel(it)}" }
+).joinToString(" · ")
 
 @Composable
 private fun SalesMetricCard(label: String, amount: Double, modifier: Modifier = Modifier) {
@@ -595,6 +611,26 @@ fun DashboardTab(
     val todayProfit = todaySales.sumOf { it.salesProfit() }
     val monthRevenue = monthSales.sumOf { it.salesTotal() }
     val monthProfit = monthSales.sumOf { it.salesProfit() }
+    val dailySales = remember(completedSales) {
+        completedSales.groupBy { sale ->
+            Calendar.getInstance().apply {
+                timeInMillis = sale.session.updatedAt
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+        }.map { (dayStart, sales) ->
+            DailySalesSummary(
+                dayStart = dayStart,
+                sales = sales.sumOf { it.salesTotal() },
+                profit = sales.sumOf { it.salesProfit() }
+            )
+        }.sortedByDescending { it.dayStart }
+    }
+    var selectedSalesDay by rememberSaveable { mutableStateOf<Long?>(null) }
+    var dailyDateMenuExpanded by remember { mutableStateOf(false) }
+    val selectedDailySales = dailySales.firstOrNull { it.dayStart == selectedSalesDay } ?: dailySales.firstOrNull()
 
     LazyColumn(
         modifier = Modifier
@@ -618,6 +654,57 @@ fun DashboardTab(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     SalesMetricCard("This month's sales", monthRevenue, Modifier.weight(1f))
                     SalesMetricCard("This month's gross profit", monthProfit, Modifier.weight(1f))
+                }
+            }
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Daily sales & profit", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                if (selectedDailySales == null) {
+                    Text(
+                        "Completed sales will appear here by date.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Box {
+                        OutlinedButton(onClick = { dailyDateMenuExpanded = true }) {
+                            Icon(Icons.Default.CalendarMonth, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text(SimpleDateFormat("EEE, dd MMM yyyy", Locale.getDefault()).format(Date(selectedDailySales.dayStart)))
+                            Icon(Icons.Default.ArrowDropDown, contentDescription = "Choose sales date")
+                        }
+                        DropdownMenu(
+                            expanded = dailyDateMenuExpanded,
+                            onDismissRequest = { dailyDateMenuExpanded = false }
+                        ) {
+                            dailySales.forEach { day ->
+                                DropdownMenuItem(
+                                    text = { Text(SimpleDateFormat("EEE, dd MMM yyyy", Locale.getDefault()).format(Date(day.dayStart))) },
+                                    onClick = {
+                                        selectedSalesDay = day.dayStart
+                                        dailyDateMenuExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Sales", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("₹" + String.format(Locale.getDefault(), "%.2f", selectedDailySales.sales), fontWeight = FontWeight.Bold)
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Gross profit", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("₹" + String.format(Locale.getDefault(), "%.2f", selectedDailySales.profit), fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1384,12 +1471,26 @@ fun InventoryItemRow(
                             color = MaterialTheme.colorScheme.primary
                         )
                     }
-					Text(
+                    Text(
                         text = "SKU: ${item.sku ?: "Pending"}",
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (!item.colorCode.equals("NA", ignoreCase = true)) {
+                        Text(
+                            text = "Color: ${ProductColorCatalog.displayLabel(item.colorCode, item.colorName)}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (!item.sizeCode.equals("NA", ignoreCase = true)) {
+                        Text(
+                            text = "Size: ${ProductSizeCatalog.displayLabel(item.sizeCode)}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
 
                 // Price details
@@ -1521,6 +1622,7 @@ fun CameraPreview(
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     val lastReportedBarcode = remember { AtomicReference<String?>(null) }
     val missedBarcodeFrames = remember { AtomicInteger(0) }
+    val lastBarcodeReportedAt = remember { AtomicLong(0L) }
     val latestIsScanning by rememberUpdatedState(isScanning)
     val latestOnBarcodeScanned by rememberUpdatedState(onBarcodeScanned)
     val barcodeScanner = remember {
@@ -1568,6 +1670,7 @@ fun CameraPreview(
                                 if (!latestIsScanning) {
                                     lastReportedBarcode.set(null)
                                     missedBarcodeFrames.set(0)
+                                    lastBarcodeReportedAt.set(0L)
                                 }
                                 imageProxy.close()
                             } else {
@@ -1581,15 +1684,20 @@ fun CameraPreview(
                                         val rawValue = barcode?.rawValue
                                         if (rawValue != null) {
                                             missedBarcodeFrames.set(0)
-                                            val previousBarcode = lastReportedBarcode.getAndSet(rawValue)
-                                            if (previousBarcode != rawValue) {
+                                            val previousBarcode = lastReportedBarcode.get()
+                                            val now = SystemClock.elapsedRealtime()
+                                            val lastReportedAt = lastBarcodeReportedAt.get()
+                                            val cooldownPassed = lastReportedAt == 0L || now - lastReportedAt >= 1_500L
+                                            if (previousBarcode != rawValue && cooldownPassed) {
+                                                lastReportedBarcode.set(rawValue)
+                                                lastBarcodeReportedAt.set(now)
                                                 ContextCompat.getMainExecutor(context).execute {
                                                     if (latestIsScanning) {
                                                         latestOnBarcodeScanned(rawValue)
                                                     }
                                                 }
                                             }
-                                        } else if (missedBarcodeFrames.incrementAndGet() >= 4) {
+                                        } else if (missedBarcodeFrames.incrementAndGet() >= 12) {
                                             lastReportedBarcode.set(null)
                                         }
                                     }
@@ -2657,6 +2765,7 @@ fun AddEditProductDialog(
         barcode: String,
 		productCode: String,
         colorCode: String,
+        colorName: String,
         sizeCode: String,
         name: String,
         desc: String,
@@ -2672,9 +2781,15 @@ fun AddEditProductDialog(
     // Reset or update state when initialItem changes (crucial for prefill to reflect instantly in the state!)
     var name by remember(initialItem) { mutableStateOf(initialItem?.name ?: "") }
     var barcode by remember(initialItem) { mutableStateOf(initialItem?.barcode ?: "") }
-	var productCode by remember(initialItem) { mutableStateOf(if (initialItem == null) "" else initialItem.productCode) }
+    var productCode by remember(initialItem) { mutableStateOf(if (initialItem == null) "" else initialItem.productCode) }
     var colorCode by remember(initialItem) { mutableStateOf(initialItem?.colorCode ?: "NA") }
+    var colorName by remember(initialItem) { mutableStateOf(initialItem?.colorName ?: "") }
+    var customColor by remember(initialItem) {
+        mutableStateOf(initialItem != null && initialItem.colorCode != "NA" && ProductColorCatalog.options.none { it.code == initialItem.colorCode })
+    }
     var sizeCode by remember(initialItem) { mutableStateOf(initialItem?.sizeCode ?: "NA") }
+    var colorMenuExpanded by remember(initialItem) { mutableStateOf(false) }
+    var sizeMenuExpanded by remember(initialItem) { mutableStateOf(false) }
     var description by remember(initialItem) { mutableStateOf(initialItem?.description ?: "") }
     var category by remember(initialItem) { mutableStateOf(initialItem?.category ?: "General") }
     var currentQuantityStr by remember(initialItem) { mutableStateOf(initialItem?.currentQuantity?.toString() ?: "10") }
@@ -2844,22 +2959,95 @@ fun AddEditProductDialog(
                             modifier = Modifier.weight(1f).testTag("input_product_code"),
                             singleLine = true
                         )
-                        OutlinedTextField(
-                            value = colorCode,
-                            onValueChange = { colorCode = it.filter { char -> char.isLetterOrDigit() }.take(2).uppercase(Locale.ROOT) },
-                            label = { Text("Color") },
-                            placeholder = { Text("BE") },
-                            modifier = Modifier.weight(1f).testTag("input_color_code"),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
-                            value = sizeCode,
-                            onValueChange = { sizeCode = it.filter { char -> char.isLetterOrDigit() }.take(4).uppercase(Locale.ROOT) },
-                            label = { Text("Size") },
-                            placeholder = { Text("36") },
-                            modifier = Modifier.weight(1f).testTag("input_size_code"),
-                            singleLine = true
-                        )
+                        ExposedDropdownMenuBox(
+                            expanded = colorMenuExpanded,
+                            onExpandedChange = { colorMenuExpanded = it },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            OutlinedTextField(
+                                value = if (customColor) colorName.ifBlank { "Custom color" } else ProductColorCatalog.displayLabel(colorCode, colorName),
+                                onValueChange = {},
+                                label = { Text("Color") },
+                                modifier = Modifier.fillMaxWidth().menuAnchor().testTag("input_color_code"),
+                                readOnly = true,
+                                singleLine = true,
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = colorMenuExpanded) }
+                            )
+                            ExposedDropdownMenu(
+                                expanded = colorMenuExpanded,
+                                onDismissRequest = { colorMenuExpanded = false }
+                            ) {
+                                ProductColorCatalog.options.forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(option.label) },
+                                        onClick = {
+                                            colorCode = option.code
+                                            colorName = option.label
+                                            customColor = false
+                                            colorMenuExpanded = false
+                                        }
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Add custom color…") },
+                                    onClick = {
+                                        customColor = true
+                                        colorCode = ""
+                                        colorName = ""
+                                        colorMenuExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                        ExposedDropdownMenuBox(
+                            expanded = sizeMenuExpanded,
+                            onExpandedChange = { sizeMenuExpanded = it },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            OutlinedTextField(
+                                value = ProductSizeCatalog.displayLabel(sizeCode),
+                                onValueChange = {},
+                                label = { Text("Age size") },
+                                modifier = Modifier.fillMaxWidth().menuAnchor().testTag("input_size_code"),
+                                readOnly = true,
+                                singleLine = true,
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = sizeMenuExpanded) }
+                            )
+                            ExposedDropdownMenu(
+                                expanded = sizeMenuExpanded,
+                                onDismissRequest = { sizeMenuExpanded = false }
+                            ) {
+                                ProductSizeCatalog.options.forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(option.label) },
+                                        onClick = {
+                                            sizeCode = option.code
+                                            sizeMenuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (customColor) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = colorName,
+                                onValueChange = { colorName = it },
+                                label = { Text("Color name") },
+                                placeholder = { Text("Lavender") },
+                                modifier = Modifier.weight(2f).testTag("input_custom_color_name"),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = colorCode,
+                                onValueChange = { colorCode = it.filter { char -> char.isLetterOrDigit() }.take(2).uppercase(Locale.ROOT) },
+                                label = { Text("2-character code") },
+                                placeholder = { Text("LV") },
+                                modifier = Modifier.weight(1f).testTag("input_custom_color_code"),
+                                singleLine = true
+                            )
+                        }
                     }
                     Text(
                         text = "SKU after save: ${SkuGenerator.preview(productCode, colorCode, sizeCode)}",
@@ -2872,6 +3060,14 @@ fun AddEditProductDialog(
                         value = initialItem?.sku.orEmpty(),
                         onValueChange = {},
                         label = { Text("SKU (fixed for this product variant)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        readOnly = true,
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = ProductSizeCatalog.displayLabel(initialItem?.sizeCode ?: "NA"),
+                        onValueChange = {},
+                        label = { Text("Age size") },
                         modifier = Modifier.fillMaxWidth(),
                         readOnly = true,
                         singleLine = true
@@ -2987,12 +3183,13 @@ fun AddEditProductDialog(
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(
-					 enabled = name.isNotBlank() && SkuGenerator.isValidComponents(productCode, colorCode, sizeCode),
+					 enabled = name.isNotBlank() && SkuGenerator.isValidComponents(productCode, colorCode, sizeCode) && (!customColor || colorName.isNotBlank()),
                         onClick = {
 						onSave(
 								barcode,
                                 productCode,
                                 colorCode,
+                                colorName,
                                 sizeCode,
                                 name,
                                 description,
@@ -3306,6 +3503,11 @@ fun LedgerTab(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Text(
+                    "Size options: New Born; 0-3 Months; 3-6 Months; 6-9 Months; 9-12 Months; 12-18 Months; 18-24 Months; 1 - 2 Years; 2 - 3 Years.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 BulkProductSheetActions(
                     onPreviewCsv = onPreviewProductCsv,
                     onImportProducts = onImportProducts
@@ -3463,6 +3665,59 @@ fun LedgerTab(
 
 @Composable
 fun PurchaseHistoryTab(completedSales: List<BillingSessionWithItems>) {
+    val context = LocalContext.current
+    var dateFilter by rememberSaveable { mutableStateOf("ALL") }
+    var filterMenuExpanded by remember { mutableStateOf(false) }
+    var startDate by rememberSaveable { mutableStateOf<Long?>(null) }
+    var endDate by rememberSaveable { mutableStateOf<Long?>(null) }
+
+    fun dayStart(timestamp: Long): Long = Calendar.getInstance().apply {
+        timeInMillis = timestamp
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
+    val todayStart = dayStart(System.currentTimeMillis())
+    val tomorrowStart = Calendar.getInstance().apply { timeInMillis = todayStart; add(Calendar.DAY_OF_YEAR, 1) }.timeInMillis
+    val sevenDaysAgo = Calendar.getInstance().apply { timeInMillis = todayStart; add(Calendar.DAY_OF_YEAR, -6) }.timeInMillis
+    val monthStart = Calendar.getInstance().apply {
+        timeInMillis = todayStart
+        set(Calendar.DAY_OF_MONTH, 1)
+    }.timeInMillis
+    val customStart = listOfNotNull(startDate, endDate).minOrNull()?.let(::dayStart)
+    val customEnd = listOfNotNull(startDate, endDate).maxOrNull()?.let { selected ->
+        Calendar.getInstance().apply { timeInMillis = dayStart(selected); add(Calendar.DAY_OF_YEAR, 1) }.timeInMillis
+    }
+    val filteredSales = completedSales.filter { sale ->
+        val timestamp = sale.session.updatedAt
+        when (dateFilter) {
+            "TODAY" -> timestamp >= todayStart && timestamp < tomorrowStart
+            "LAST_7_DAYS" -> timestamp >= sevenDaysAgo && timestamp < tomorrowStart
+            "THIS_MONTH" -> timestamp >= monthStart && timestamp < tomorrowStart
+            "CUSTOM" -> (customStart == null || timestamp >= customStart) && (customEnd == null || timestamp < customEnd)
+            else -> true
+        }
+    }
+
+    fun openDatePicker(currentValue: Long?, onSelected: (Long) -> Unit) {
+        val calendar = Calendar.getInstance().apply { timeInMillis = currentValue ?: System.currentTimeMillis() }
+        android.app.DatePickerDialog(
+            context,
+            { _, year, month, day ->
+                val selected = Calendar.getInstance().apply {
+                    set(year, month, day, 0, 0, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }.timeInMillis
+                onSelected(selected)
+            },
+            calendar.get(Calendar.YEAR),
+            calendar.get(Calendar.MONTH),
+            calendar.get(Calendar.DAY_OF_MONTH)
+        ).show()
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("purchase_history_root"),
         contentPadding = PaddingValues(16.dp),
@@ -3472,16 +3727,66 @@ fun PurchaseHistoryTab(completedSales: List<BillingSessionWithItems>) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Purchase history", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Text("Completed customer bills and their saved totals.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Box {
+                    OutlinedButton(onClick = { filterMenuExpanded = true }) {
+                        Icon(Icons.Default.CalendarMonth, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            when (dateFilter) {
+                                "TODAY" -> "Today"
+                                "LAST_7_DAYS" -> "Last 7 days"
+                                "THIS_MONTH" -> "This month"
+                                "CUSTOM" -> "Custom dates"
+                                else -> "All dates"
+                            }
+                        )
+                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                    }
+                    DropdownMenu(expanded = filterMenuExpanded, onDismissRequest = { filterMenuExpanded = false }) {
+                        listOf(
+                            "ALL" to "All dates",
+                            "TODAY" to "Today",
+                            "LAST_7_DAYS" to "Last 7 days",
+                            "THIS_MONTH" to "This month",
+                            "CUSTOM" to "Custom range"
+                        ).forEach { (key, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    dateFilter = key
+                                    filterMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+                if (dateFilter == "CUSTOM") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(onClick = { openDatePicker(startDate) { startDate = it } }) {
+                            Text(startDate?.let { SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(it)) } ?: "Start date")
+                        }
+                        OutlinedButton(onClick = { openDatePicker(endDate) { endDate = it } }) {
+                            Text(endDate?.let { SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(it)) } ?: "End date")
+                        }
+                        if (startDate != null || endDate != null) {
+                            TextButton(onClick = { startDate = null; endDate = null }) { Text("Clear") }
+                        }
+                    }
+                }
             }
         }
-        if (completedSales.isEmpty()) {
+        if (filteredSales.isEmpty()) {
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
-                    Text("Completed customer purchases will appear here.", modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (completedSales.isEmpty()) "Completed customer purchases will appear here." else "No purchases in the selected date range.",
+                        modifier = Modifier.padding(16.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         } else {
-            items(completedSales, key = { "sale-history-${it.session.id}" }) { sale ->
+            items(filteredSales, key = { "sale-history-${it.session.id}" }) { sale ->
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier.fillMaxWidth().padding(14.dp),
@@ -3818,6 +4123,9 @@ fun SalesTab(
                         Column(Modifier.weight(1f)) {
                             Text(item.name, fontWeight = FontWeight.SemiBold)
                             Text("Stock: " + item.currentQuantity + " · ₹" + String.format(Locale.getDefault(), "%.2f", item.sellingPrice) + " each", style = MaterialTheme.typography.bodySmall)
+                            item.variantDescription().takeIf { it.isNotBlank() }?.let { details ->
+                                Text(details, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                         TextButton(
                             onClick = { addItemToBill(item, quantityEntry.toIntOrNull() ?: 1) },
@@ -3839,7 +4147,8 @@ fun SalesTab(
                 }
             } else {
                 items(billItems, key = { "bill-line-${it.itemId}" }) { line ->
-                    val inStock = items.firstOrNull { it.id == line.itemId }?.currentQuantity ?: 0
+                    val inventoryItem = items.firstOrNull { it.id == line.itemId }
+                    val inStock = inventoryItem?.currentQuantity ?: 0
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -3847,6 +4156,9 @@ fun SalesTab(
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Text(line.productName, fontWeight = FontWeight.SemiBold)
+                                inventoryItem?.variantDescription()?.takeIf { it.isNotBlank() }?.let { details ->
+                                    Text(details, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                                 Text(
                                     line.quantity.toString() + " × ₹" + String.format(Locale.getDefault(), "%.2f", line.unitPrice) + " = ₹" + String.format(Locale.getDefault(), "%.2f", line.quantity * line.unitPrice),
                                     style = MaterialTheme.typography.bodySmall

@@ -238,6 +238,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         barcode: String,
         productCode: String,
         colorCode: String,
+        colorName: String,
         sizeCode: String,
         name: String,
         description: String,
@@ -261,6 +262,10 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             }
             if (!SkuGenerator.isValidComponents(normalizedProductCode, normalizedColorCode, normalizedSizeCode)) {
                 triggerNotification("Use a 2-character product code, a 2-character color code, and a 1–4 character size code. Use NA when color or size does not apply.", "ERROR")
+                return@launch
+            }
+            if (!ProductColorCatalog.isKnownCode(normalizedColorCode) && colorName.isBlank()) {
+                triggerNotification("Enter a name for the selected custom color.", "ERROR")
                 return@launch
             }
             if (quantity < 0 || threshold < 0 || purchasePrice < 0 || listPrice < 0 || discountPercentage !in 0.0..100.0) {
@@ -293,6 +298,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     barcode = normalizedBarcode,
                     productCode = normalizedProductCode,
                     colorCode = normalizedColorCode,
+                    colorName = colorName.trim(),
                     sizeCode = normalizedSizeCode,
                     name = name,
                     description = description,
@@ -310,6 +316,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     barcode = normalizedBarcode,
                     productCode = normalizedProductCode,
                     colorCode = normalizedColorCode,
+                    colorName = colorName.trim(),
                     sizeCode = normalizedSizeCode,
                     name = name,
                     description = description,

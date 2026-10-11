@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         BillingSession::class,
         BillingSessionItem::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -33,7 +33,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "inventory_database"
                 )
-                .addMigrations(MIGRATION_3_5, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_3_5, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance
@@ -70,6 +70,12 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE billing_sessions ADD COLUMN discountType TEXT NOT NULL DEFAULT 'PERCENTAGE'")
                 db.execSQL("ALTER TABLE billing_sessions ADD COLUMN discountValue REAL NOT NULL DEFAULT 0.0")
                 db.execSQL("UPDATE billing_sessions SET discountValue = discountPercentage")
+            }
+        }
+
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE inventory_items ADD COLUMN colorName TEXT NOT NULL DEFAULT ''")
             }
         }
 

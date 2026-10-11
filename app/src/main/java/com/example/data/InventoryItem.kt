@@ -21,6 +21,7 @@ data class InventoryItem(
     val updatedAt: Long = System.currentTimeMillis(),
     val productCode: String = "GN",
     val colorCode: String = "NA",
+    val colorName: String = "",
     val sizeCode: String = "NA",
     val sku: String? = null
 
